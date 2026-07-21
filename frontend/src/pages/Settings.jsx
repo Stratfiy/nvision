@@ -11,8 +11,8 @@ const PROVIDERS = [
   { k: "anthropic", label: "Anthropic", desc: "Claude Sonnet 4.x", fields: [
     { k: "api_key", label: "API KEY", ph: "sk-ant-…" },
   ]},
-  { k: "gemini", label: "Google Gemini", desc: "gemini-3-flash-preview", fields: [
-    { k: "api_key", label: "API KEY" },
+  { k: "gemini", label: "Google Gemini", desc: "gemini-flash-latest · powers vision detections", fields: [
+    { k: "api_key", label: "API KEY", ph: "AIza… or AQ.…" },
   ]},
   { k: "twilio", label: "Twilio", desc: "WhatsApp · SMS · Voice", fields: [
     { k: "sid", label: "ACCOUNT SID", ph: "ACxxxxxxxxxxxxxxxxxxxxxxxxxx" },

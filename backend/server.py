@@ -244,14 +244,30 @@ TEMPLATES = [
 
 
 # ========================= AI (Vision + Memory Q&A) =========================
-_genai_client = None
+_genai_clients: Dict[str, Any] = {}
 
-def _get_genai_client():
-    global _genai_client
-    if _genai_client is None:
+def _get_genai_client(api_key: str):
+    if api_key not in _genai_clients:
         from google import genai
-        _genai_client = genai.Client(api_key=GEMINI_API_KEY)
-    return _genai_client
+        _genai_clients[api_key] = genai.Client(api_key=api_key)
+    return _genai_clients[api_key]
+
+
+async def _user_byo_key(user_id: str, provider: str, field: str = "api_key") -> Optional[str]:
+    """Return a user's decrypted BYO key for a provider, or None. Used to let
+    accounts bring their own Gemini/Anthropic key via Settings instead of the
+    server-wide env key."""
+    user = await db.users.find_one({"id": user_id}, {"byo_keys": 1})
+    v = ((user or {}).get("byo_keys", {}) or {}).get(provider)
+    if isinstance(v, dict):
+        raw = v.get(field, "")
+    elif isinstance(v, str):
+        raw = v
+    else:
+        raw = ""
+    if not raw:
+        return None
+    return decrypt_secret(raw) or None
 
 
 def _guess_image_mime(b64: str) -> str:
@@ -265,10 +281,12 @@ def _guess_image_mime(b64: str) -> str:
     return "image/jpeg"
 
 
-async def run_vision_detection(prompt: str, image_b64: str, sample_b64s: List[str], sensitivity: float, zones: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
-    """Analyze image with Gemini Flash vision, return {match, confidence, caption, objects}."""
-    if not GEMINI_API_KEY:
-        return {"match": False, "confidence": 0.0, "caption": "AI unavailable: GEMINI_API_KEY not configured", "objects": []}
+async def run_vision_detection(prompt: str, image_b64: str, sample_b64s: List[str], sensitivity: float, zones: Optional[List[Dict[str, Any]]] = None, api_key: Optional[str] = None) -> Dict[str, Any]:
+    """Analyze image with Gemini Flash vision, return {match, confidence, caption, objects}.
+    Uses the caller's BYO key when provided, else the server-wide GEMINI_API_KEY."""
+    key = api_key or GEMINI_API_KEY
+    if not key:
+        return {"match": False, "confidence": 0.0, "caption": "AI unavailable: no Gemini API key (add one in Settings → BYO Provider Keys, or set GEMINI_API_KEY)", "objects": []}
 
     zones_note = ""
     if zones:
@@ -308,7 +326,7 @@ async def run_vision_detection(prompt: str, image_b64: str, sample_b64s: List[st
     contents.append(user_text)
 
     try:
-        resp = await _get_genai_client().aio.models.generate_content(
+        resp = await _get_genai_client(key).aio.models.generate_content(
             model=GEMINI_MODEL,
             contents=contents,
             config=genai_types.GenerateContentConfig(
@@ -354,18 +372,18 @@ def _parse_vlm_json(text: str) -> Optional[Dict[str, Any]]:
         return None
 
 
-_anthropic_client = None
+_anthropic_clients: Dict[str, Any] = {}
 
-def _get_anthropic_client():
-    global _anthropic_client
-    if _anthropic_client is None:
+def _get_anthropic_client(api_key: str):
+    if api_key not in _anthropic_clients:
         import anthropic
-        _anthropic_client = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
-    return _anthropic_client
+        _anthropic_clients[api_key] = anthropic.AsyncAnthropic(api_key=api_key)
+    return _anthropic_clients[api_key]
 
 
-async def answer_memory(question: str, events: List[Dict[str, Any]]) -> str:
-    """Use Claude to answer a memory question over retrieved event captions."""
+async def answer_memory(question: str, events: List[Dict[str, Any]], api_key: Optional[str] = None) -> str:
+    """Use Claude to answer a memory question over retrieved event captions.
+    Uses the caller's BYO key when provided, else the server-wide ANTHROPIC_API_KEY."""
     if not events:
         return "No events matched your question in memory."
 
@@ -374,12 +392,13 @@ async def answer_memory(question: str, events: List[Dict[str, Any]]) -> str:
         lines.append(f"[{e.get('timestamp','')}] Camera={e.get('camera_name','?')} match={e.get('match')} conf={e.get('confidence',0):.2f} — {e.get('caption','')}")
     context = "\n".join(lines)
 
-    if not ANTHROPIC_API_KEY:
+    key = api_key or ANTHROPIC_API_KEY
+    if not key:
         # Degraded mode: no LLM available — return the matched log directly.
-        return "AI memory answers are disabled (ANTHROPIC_API_KEY not set). Matching events:\n" + context[:1800]
+        return "AI memory answers are disabled (add an Anthropic key in Settings, or set ANTHROPIC_API_KEY). Matching events:\n" + context[:1800]
 
     try:
-        resp = await _get_anthropic_client().messages.create(
+        resp = await _get_anthropic_client(key).messages.create(
             model=ANTHROPIC_MODEL,
             max_tokens=1024,
             system=(
@@ -783,10 +802,12 @@ async def run_detection_pipeline(user_id: str, det: Dict[str, Any], cam: Dict[st
         logger.info("vlm skipped (insufficient credits) user=%s detection=%s", user_id, det["id"])
         return {"error": "insufficient_credits"}
 
+    gemini_key = await _user_byo_key(user_id, "gemini")
     result = await run_vision_detection(
         det["prompt"], img_b64, det.get("sample_images_b64", []),
         det.get("sensitivity", 0.6),
         zones=cam.get("zones") or [],
+        api_key=gemini_key,
     )
     is_match = result["match"] and result["confidence"] >= det.get("sensitivity", 0.6)
     logger.info("vlm eval source=%s camera=%s detection=%s match=%s conf=%.2f", source, cam["id"], det["id"], is_match, result["confidence"])
@@ -1012,7 +1033,8 @@ async def memory_query(body: MemoryQueryIn, user=Depends(current_user)):
         # fallback — recent events irrespective of keyword
         events = await db.events.find({"user_id": user["id"]}, {"_id": 0, "snapshot_b64": 0}).sort("timestamp", -1).limit(15).to_list(15)
 
-    answer = await answer_memory(body.query, events)
+    anthropic_key = await _user_byo_key(user["id"], "anthropic")
+    answer = await answer_memory(body.query, events, api_key=anthropic_key)
     return {"answer": answer, "citations": events[:body.limit]}
 
 
