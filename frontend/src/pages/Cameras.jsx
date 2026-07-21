@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { api } from "@/lib/api";
 import { Link } from "react-router-dom";
-import { Plus, Cctv, Trash2, X, Layers } from "lucide-react";
+import { Plus, Cctv, Trash2, X, Layers, Pencil } from "lucide-react";
 import { toast } from "sonner";
 import ZoneEditor from "@/components/ZoneEditor";
 
@@ -14,6 +14,7 @@ export default function Cameras() {
   const [cams, setCams] = useState([]);
   const [showAdd, setShowAdd] = useState(false);
   const [zoneCam, setZoneCam] = useState(null);
+  const [editCam, setEditCam] = useState(null);
 
   const load = () => api.get("/cameras").then((r) => setCams(r.data));
   useEffect(() => { load(); }, []);
@@ -78,13 +79,22 @@ export default function Cameras() {
                   <div className="text-[11px] font-mono text-[#737373] mt-1 truncate">{c.rtsp_url || c.snapshot_url || "—"}</div>
                   <div className="text-[10px] text-[#a3a3a3] mt-2 tracking-widest">{c.site?.toUpperCase()} · {c.timezone}</div>
                 </Link>
-                <button
-                  onClick={()=>setZoneCam(c)}
-                  className="mt-3 border border-[#262626] hover:border-[#ccff00] text-[11px] font-mono tracking-widest text-[#a3a3a3] hover:text-[#ccff00] px-3 py-1.5 inline-flex items-center gap-1.5 transition-colors"
-                  data-testid={`zones-cam-${c.id}`}
-                >
-                  <Layers size={11}/> {c.zones?.length ? "EDIT ZONES" : "DRAW ZONES"}
-                </button>
+                <div className="mt-3 flex flex-wrap gap-2">
+                  <button
+                    onClick={()=>setZoneCam(c)}
+                    className="border border-[#262626] hover:border-[#ccff00] text-[11px] font-mono tracking-widest text-[#a3a3a3] hover:text-[#ccff00] px-3 py-1.5 inline-flex items-center gap-1.5 transition-colors"
+                    data-testid={`zones-cam-${c.id}`}
+                  >
+                    <Layers size={11}/> {c.zones?.length ? "EDIT ZONES" : "DRAW ZONES"}
+                  </button>
+                  <button
+                    onClick={()=>setEditCam(c)}
+                    className="border border-[#262626] hover:border-[#ccff00] text-[11px] font-mono tracking-widest text-[#a3a3a3] hover:text-[#ccff00] px-3 py-1.5 inline-flex items-center gap-1.5 transition-colors"
+                    data-testid={`edit-cam-${c.id}`}
+                  >
+                    <Pencil size={11}/> EDIT RTSP
+                  </button>
+                </div>
               </div>
             </div>
           ))}
@@ -92,6 +102,7 @@ export default function Cameras() {
       )}
 
       {showAdd && <AddCameraModal onClose={()=>{ setShowAdd(false); load(); }} />}
+      {editCam && <EditRtspModal camera={editCam} onClose={()=>{ setEditCam(null); load(); }} />}
       {zoneCam && <ZoneEditor camera={zoneCam} onClose={(changed)=>{ setZoneCam(null); if (changed) load(); }} />}
     </div>
   );
@@ -121,11 +132,11 @@ function AddCameraModal({ onClose }) {
       <div className="nv-card p-6 w-full max-w-lg relative">
         <button onClick={onClose} className="absolute top-3 right-3 text-[#737373] hover:text-white" data-testid="close-add-cam"><X size={16}/></button>
         <h2 className="font-display font-black text-2xl tracking-tight mb-1">Add camera</h2>
-        <p className="text-[12px] text-[#a3a3a3] mb-5">RTSP is captured for Phase 2. For MVP, use a snapshot URL — a public image works fine for demo.</p>
+        <p className="text-[12px] text-[#a3a3a3] mb-5">Point NVision at a live RTSP stream — the ingestion worker connects, watches for motion, and runs your detections in real time. A snapshot URL is an optional fallback for manual "Run now" checks.</p>
         <form onSubmit={submit} className="space-y-3">
           <Field label="NAME" value={name} onChange={(e)=>setName(e.target.value)} required testid="cam-name" placeholder="Main gate" />
-          <Field label="RTSP URL (OPTIONAL)" value={rtsp} onChange={(e)=>setRtsp(e.target.value)} testid="cam-rtsp" placeholder="rtsp://user:pass@ip:554/stream1" />
-          <Field label="SNAPSHOT URL" value={snap} onChange={(e)=>setSnap(e.target.value)} testid="cam-snap" placeholder="https://…/frame.jpg" />
+          <Field label="RTSP URL (LIVE STREAM)" value={rtsp} onChange={(e)=>setRtsp(e.target.value)} testid="cam-rtsp" placeholder="rtsp://user:pass@ip:554/stream1" />
+          <Field label="SNAPSHOT URL (OPTIONAL FALLBACK)" value={snap} onChange={(e)=>setSnap(e.target.value)} testid="cam-snap" placeholder="https://…/frame.jpg" />
           <div className="flex flex-wrap gap-2">
             <span className="text-[10px] tracking-widest text-[#737373] font-mono">DEMO:</span>
             {DEMO_SNAPSHOTS.map((u,i)=>(
@@ -134,6 +145,38 @@ function AddCameraModal({ onClose }) {
           </div>
           <Field label="SITE" value={site} onChange={(e)=>setSite(e.target.value)} testid="cam-site" />
           <button data-testid="submit-add-cam" disabled={busy} className="nv-hard-btn w-full text-sm mt-3">{busy ? "…" : "Add camera"}</button>
+        </form>
+      </div>
+    </div>
+  );
+}
+
+function EditRtspModal({ camera, onClose }) {
+  const [rtsp, setRtsp] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const submit = async (e) => {
+    e.preventDefault();
+    setBusy(true);
+    try {
+      await api.patch(`/cameras/${camera.id}`, { rtsp_url: rtsp });
+      toast.success("RTSP URL updated — the worker will reconnect shortly");
+      onClose();
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Failed");
+    } finally { setBusy(false); }
+  };
+
+  return (
+    <div className="fixed inset-0 z-40 bg-black/70 backdrop-blur grid place-items-center p-6">
+      <div className="nv-card p-6 w-full max-w-lg relative">
+        <button onClick={onClose} className="absolute top-3 right-3 text-[#737373] hover:text-white" data-testid="close-edit-rtsp"><X size={16}/></button>
+        <h2 className="font-display font-black text-2xl tracking-tight mb-1">Edit RTSP URL</h2>
+        <p className="text-[12px] text-[#a3a3a3] mb-1">{camera.name}</p>
+        <p className="text-[11px] font-mono text-[#737373] mb-5 truncate">current: {camera.rtsp_url || "—"}</p>
+        <form onSubmit={submit} className="space-y-3">
+          <Field label="NEW RTSP URL" value={rtsp} onChange={(e)=>setRtsp(e.target.value)} required testid="edit-cam-rtsp" placeholder="rtsp://user:pass@ip:554/stream1" />
+          <button data-testid="submit-edit-rtsp" disabled={busy} className="nv-hard-btn w-full text-sm mt-3">{busy ? "…" : "Save"}</button>
         </form>
       </div>
     </div>
