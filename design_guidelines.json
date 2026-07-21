@@ -1,0 +1,129 @@
+{
+  "theme": "dark",
+  "typography": {
+    "headings": {
+      "font_family": "'Cabinet Grotesk', sans-serif",
+      "import_url": "https://api.fontshare.com/v2/css?f[]=cabinet-grotesk@800,500,700,400,900&display=swap",
+      "usage": "Dashboard titles, metric numbers, empty states, H1-H4. Use tracking-tight or tracking-tighter for larger sizes."
+    },
+    "body": {
+      "font_family": "'IBM Plex Sans', sans-serif",
+      "import_url": "https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@300;400;500;600&display=swap",
+      "usage": "Standard UI text, forms, logs descriptions, table data."
+    },
+    "mono": {
+      "font_family": "'JetBrains Mono', monospace",
+      "import_url": "https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&display=swap",
+      "usage": "Memory search NLP query, API keys, timestamps, Webhook URLs, code blocks, live camera coordinates."
+    }
+  },
+  "colors": {
+    "archetype": "ARCHETYPE 7: ELECTRIC & NEON (Developer-First / Terminal)",
+    "background": {
+      "default": "#050505",
+      "surface": "#121212",
+      "surface_elevated": "#1E1E1E",
+      "border": "#262626"
+    },
+    "primary": {
+      "default": "#CCFF00",
+      "hover": "#D4FF33",
+      "active": "#A8D100",
+      "text_on_primary": "#000000"
+    },
+    "secondary": {
+      "default": "#262626",
+      "hover": "#333333",
+      "text": "#E5E5E5"
+    },
+    "status": {
+      "success": "#CCFF00",
+      "error": "#FF3366",
+      "warning": "#FFB800",
+      "info": "#00B2FF",
+      "offline": "#525252"
+    },
+    "text": {
+      "primary": "#F5F5F5",
+      "secondary": "#A3A3A3",
+      "tertiary": "#737373"
+    },
+    "rules": [
+      "NO purple or violet gradients.",
+      "Use Acid Green (#CCFF00) sparingly for live status dots, active states, and primary CTAs.",
+      "Do not use pure black (#000) for surfaces; use #050505 or #121212 to reduce OLED smearing.",
+      "Depth is created through lightness changes and 1px borders, NOT heavy drop shadows."
+    ]
+  },
+  "layouts": {
+    "strategy": "High Density Grid (Mode B)",
+    "dashboard_grid": "grid-cols-1 md:grid-cols-3 lg:grid-cols-4 gap-4",
+    "camera_wall": "grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3 for dense viewing.",
+    "surface_treatment": "Grid Borders: Expose the skeleton. Heavy use of border-collapse and 1px subtle borders (border-[#262626]).",
+    "corners": "Sharp (rounded-none) or subtle (rounded-sm) for a brutalist technical feel."
+  },
+  "visual_enhancers": {
+    "textures": "Apply a subtle noise texture over the main background to kill digital flatness.",
+    "glows": "Subtle green drop-shadow on the pulsing 'Live' indicator dot (drop-shadow-[0_0_8px_rgba(204,255,0,0.5)]).",
+    "glassmorphism": "Used only for sticky headers/floating bars (backdrop-blur-xl bg-[#050505]/70 border-b border-[#262626]).",
+    "scanlines": "Overlay a faint repeating-linear-gradient on camera thumbnails to mimic raw feeds."
+  },
+  "components": {
+    "cards": "Flat background (#121212), 1px border (#262626), zero shadow. On hover: border brightens slightly.",
+    "buttons": "Square edges, high contrast. Primary button: bg-[#CCFF00] text-black font-semibold.",
+    "inputs": "Dark background (#050505), border (#262626). Focus ring: ring-1 ring-[#CCFF00].",
+    "memory_search": "Prominent, command-palette style input, mono font, hinting at NLP ('Ask your cameras...').",
+    "badges": "Flat colors. Red for alerts (bg-[#FF3366]/10 text-[#FF3366] border border-[#FF3366]/20)."
+  },
+  "motion": {
+    "transitions": "Use specific properties: transition-colors, transition-transform duration-200.",
+    "indicators": "animate-pulse for live/recording dots.",
+    "feed": "Staggered fade-in for event feed cards."
+  },
+  "accessibility": {
+    "contrast": "Maintain WCAG AA (4.5:1). Never use low-opacity white text for primary reading.",
+    "focus": "Clear focus-visible rings on all interactive elements.",
+    "testing": "All interactive elements MUST have data-testid attributes."
+  },
+  "media": {
+    "images": {
+      "camera_feed_manufacturing": {
+        "url": "https://images.unsplash.com/photo-1606206873764-fd15e242df52?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NDQ2NDJ8MHwxfHNlYXJjaHwyfHxtYW51ZmFjdHVyaW5nJTIwcXVhbGl0eSUyMGNvbnRyb2wlMjBjYW1lcmF8ZW58MHx8fHwxNzg0NjE0OTQyfDA&ixlib=rb-4.1.0&q=85",
+        "description": "Industrial robotic arm - use for manufacturing quality control preview"
+      },
+      "camera_feed_gate": {
+        "url": "https://images.pexels.com/photos/36162857/pexels-photo-36162857.jpeg?auto=compress&cs=tinysrgb&dpr=2&h=650&w=940",
+        "description": "Secured industrial gate - use for trespasser/perimeter preview"
+      },
+      "event_snapshot_helmet": {
+        "url": "https://images.pexels.com/photos/12131153/pexels-photo-12131153.jpeg?auto=compress&cs=tinysrgb&dpr=2&h=650&w=940",
+        "description": "Yellow hard hat - use for PPE detection event snapshot"
+      },
+      "camera_hardware": {
+        "url": "https://images.unsplash.com/photo-1672073311074-f60c4a5e7b92?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjY2NzF8MHwxfHNlYXJjaHwyfHxzZWN1cml0eSUyMGNhbWVyYSUyMGdhdGUlMjBuaWdodHxlbnwwfHx8fDE3ODQ2MTQ5NDJ8MA&ixlib=rb-4.1.0&q=85",
+        "description": "Close up of security camera - use for onboarding/empty states"
+      }
+    },
+    "icons": {
+      "library": "lucide-react",
+      "instruction": "Use Lucide React with technical precision (strokeWidth={1.5})."
+    }
+  },
+  "instructions_to_main_agent": [
+    "Implement a dark-first dashboard. Do NOT build a light mode toggle.",
+    "Inject the defined fonts (Cabinet Grotesk, IBM Plex Sans, JetBrains Mono) via @import in index.css.",
+    "Use Shadcn UI components but heavily customize them to remove the 'Vercel-default' border-radius. Make them sharper and use the #262626 border color.",
+    "The Memory Search bar should be the centerpiece of the events page, feeling like a developer's CLI tool.",
+    "Use provided image URLs in camera cards and event timelines.",
+    "Add 'data-testid' to all buttons, links, and forms.",
+    "Use recharts for analytics, styling lines with #CCFF00 and removing grid lines for a cleaner look."
+  ],
+  "UNIVERSAL_GUIDELINES_FOR_MAIN_AGENT": [
+    "NEVER apply universal transitions (e.g., transition: all).",
+    "NEVER center-align the app container (.App { text-align: center; }).",
+    "Create depth using background lightness shifts, NOT shadows.",
+    "Use glass-morphism ONLY over scrolling content (like navbars), never over solid backgrounds.",
+    "Always use lucide-react icons; never use emojis as icons.",
+    "Prioritize optical alignment over geometric alignment."
+  ]
+}
