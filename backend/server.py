@@ -316,11 +316,10 @@ async def run_vision_detection(prompt: str, image_b64: str, sample_b64s: List[st
                 response_mime_type="application/json",
             ),
         )
-        text = resp.text or ""
-        m = re.search(r'\{.*\}', text, re.DOTALL)
-        if not m:
+        text = (resp.text or "").strip()
+        data = _parse_vlm_json(text)
+        if data is None:
             return {"match": False, "confidence": 0.0, "caption": "Model returned non-JSON.", "objects": []}
-        data = json.loads(m.group(0))
         return {
             "match": bool(data.get("match", False)),
             "confidence": float(data.get("confidence", 0.0)),
@@ -330,6 +329,29 @@ async def run_vision_detection(prompt: str, image_b64: str, sample_b64s: List[st
     except Exception as e:
         logger.exception("vision detection failed")
         return {"match": False, "confidence": 0.0, "caption": f"Detection error: {e}", "objects": []}
+
+
+def _parse_vlm_json(text: str) -> Optional[Dict[str, Any]]:
+    """Parse the VLM's JSON answer robustly.
+    JSON response mode returns clean JSON, but tolerate markdown fences and any
+    trailing content by decoding the first complete JSON object."""
+    if not text:
+        return None
+    if text.startswith("```"):
+        text = re.sub(r'^```(?:json)?\s*|\s*```$', '', text.strip())
+    try:
+        obj = json.loads(text)
+        return obj if isinstance(obj, dict) else None
+    except json.JSONDecodeError:
+        pass
+    start = text.find("{")
+    if start == -1:
+        return None
+    try:
+        obj, _ = json.JSONDecoder().raw_decode(text[start:])
+        return obj if isinstance(obj, dict) else None
+    except json.JSONDecodeError:
+        return None
 
 
 _anthropic_client = None
