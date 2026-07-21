@@ -17,6 +17,19 @@ export default function ZoneEditor({ camera, onClose }) {
   const [busy, setBusy] = useState(false);
   const [nextName, setNextName] = useState("Zone A");
 
+  const STOCK = "https://images.pexels.com/photos/36162857/pexels-photo-36162857.jpeg?auto=compress&cs=tinysrgb&dpr=2&h=650&w=940";
+  const [bg, setBg] = useState(camera.snapshot_url || STOCK);
+  const [liveFrame, setLiveFrame] = useState(false);
+
+  // Prefer a real still captured from the RTSP stream by the worker.
+  useEffect(() => {
+    let alive = true;
+    api.get(`/cameras/${camera.id}/snapshot`)
+      .then((r) => { if (alive && r.data?.image_b64) { setBg(`data:image/jpeg;base64,${r.data.image_b64}`); setLiveFrame(true); } })
+      .catch(() => {});
+    return () => { alive = false; };
+  }, [camera.id]);
+
   useEffect(() => { draw(); }, [zones, current, dims]);
 
   const onImgLoad = () => {
@@ -99,25 +112,28 @@ export default function ZoneEditor({ camera, onClose }) {
     } finally { setBusy(false); }
   };
 
-  const snap = camera.snapshot_url || "https://images.pexels.com/photos/36162857/pexels-photo-36162857.jpeg?auto=compress&cs=tinysrgb&dpr=2&h=650&w=940";
-
   return (
     <div className="fixed inset-0 z-40 bg-black/80 backdrop-blur overflow-y-auto p-4">
       <div className="nv-card w-full max-w-4xl mx-auto relative">
         <button onClick={()=>onClose(false)} className="absolute top-3 right-3 text-[#737373] hover:text-white z-10" data-testid="close-zone-editor"><X size={16}/></button>
         <div className="px-5 py-3 border-b border-[#262626]">
           <div className="font-display font-black text-xl tracking-tight">Zone Editor · {camera.name}</div>
-          <div className="text-[12px] text-[#a3a3a3] mt-1">Click to add points → &quot;Close polygon&quot; to save that zone. Detection only fires INSIDE zones.</div>
+          <div className="text-[12px] text-[#a3a3a3] mt-1">
+            Click to add points → &quot;Close polygon&quot; to save that zone. Detection only fires INSIDE zones.
+            {liveFrame
+              ? <span className="text-[#ccff00] ml-1">· live frame from stream</span>
+              : <span className="text-[#ffb800] ml-1">· no live frame yet — showing placeholder (worker captures one within ~15s of connecting)</span>}
+          </div>
         </div>
 
         <div className="p-5">
           <div className="relative inline-block w-full" style={{ maxWidth: 900 }}>
             <img
               ref={imgRef}
-              src={snap}
+              src={bg}
               alt={camera.name}
               onLoad={onImgLoad}
-              onError={(e)=>{e.currentTarget.src="https://images.pexels.com/photos/36162857/pexels-photo-36162857.jpeg?auto=compress&cs=tinysrgb&dpr=2&h=650&w=940";}}
+              onError={(e)=>{e.currentTarget.src=STOCK;}}
               className="w-full block select-none"
               draggable={false}
             />

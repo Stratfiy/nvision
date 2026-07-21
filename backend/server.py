@@ -95,6 +95,7 @@ def public_camera(cam: Dict[str, Any]) -> Dict[str, Any]:
         return cam
     out = dict(cam)
     out.pop("_id", None)
+    out.pop("latest_frame_b64", None)  # large; served via /cameras/{id}/snapshot
     if out.get("rtsp_url"):
         out["rtsp_url"] = mask_stream_url(out["rtsp_url"])
     return out
@@ -726,6 +727,15 @@ async def get_camera(cid: str, user=Depends(current_user)):
         raise HTTPException(404, "Camera not found")
     return public_camera(cam)
 
+@api.get("/cameras/{cid}/snapshot")
+async def get_camera_snapshot(cid: str, user=Depends(current_user)):
+    """Latest live frame captured from the RTSP stream by the worker.
+    Used as the zone-editor canvas and the camera-card preview."""
+    cam = await db.cameras.find_one({"id": cid, "user_id": user["id"]}, {"latest_frame_b64": 1, "latest_frame_at": 1})
+    if not cam or not cam.get("latest_frame_b64"):
+        raise HTTPException(404, "No live frame captured yet")
+    return {"image_b64": cam["latest_frame_b64"], "ts": cam.get("latest_frame_at")}
+
 @api.delete("/cameras/{cid}")
 async def delete_camera(cid: str, user=Depends(current_user)):
     await db.cameras.delete_one({"id": cid, "user_id": user["id"]})
@@ -879,6 +889,10 @@ class IngestIn(BaseModel):
 class CameraStatusIn(BaseModel):
     status: str                                  # online | offline
 
+class FrameIn(BaseModel):
+    image_b64: str
+    ts: Optional[str] = None
+
 
 async def worker_auth(x_worker_token: Optional[str] = Header(None)):
     if not WORKER_TOKEN:
@@ -946,6 +960,20 @@ async def internal_ingest(body: IngestIn):
             results.append({"detection_id": det["id"], "match": out["event"]["match"], "confidence": out["event"]["confidence"]})
     logger.info("ingest camera=%s detections=%d ts=%s", cam["id"], len(dets), body.ts or now_iso())
     return {"camera_id": cam["id"], "results": results}
+
+
+@api.post("/internal/cameras/{cid}/frame", dependencies=[Depends(worker_auth)])
+async def internal_camera_frame(cid: str, body: FrameIn):
+    """Worker pushes a periodic preview frame (motion not required) so the UI
+    has a real image of the camera view for the zone editor and card preview."""
+    img = body.image_b64
+    if img.startswith("data:"):
+        img = img.split(",", 1)[-1]
+    await db.cameras.update_one({"id": cid}, {"$set": {
+        "latest_frame_b64": img[:400000],
+        "latest_frame_at": body.ts or now_iso(),
+    }})
+    return {"ok": True}
 
 
 @api.post("/internal/cameras/{cid}/status", dependencies=[Depends(worker_auth)])

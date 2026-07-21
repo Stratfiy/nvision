@@ -38,6 +38,7 @@ MAX_FRAME_WIDTH = int(os.environ.get("MAX_FRAME_WIDTH", "640"))
 MOTION_MIN_AREA_PCT = float(os.environ.get("MOTION_MIN_AREA_PCT", "0.5"))
 MOTION_SUSTAINED_FRAMES = int(os.environ.get("MOTION_SUSTAINED_FRAMES", "2"))
 INGEST_MIN_INTERVAL = float(os.environ.get("INGEST_MIN_INTERVAL_SECONDS", "20"))
+PREVIEW_INTERVAL = float(os.environ.get("PREVIEW_INTERVAL_SECONDS", "15"))
 JPEG_QUALITY = int(os.environ.get("JPEG_QUALITY", "80"))
 OFFLINE_AFTER_FAILURES = 3
 BACKOFF_START = 2.0
@@ -87,6 +88,19 @@ class CameraWorker(threading.Thread):
                 log.warning("camera=%s status report failed HTTP %s", self.cam_id, r.status_code)
         except requests.RequestException as e:
             log.warning("camera=%s status report error: %s", self.cam_id, e)
+
+    def push_preview(self, frame):
+        """Send a periodic still (no motion required) for the UI preview / zone editor."""
+        ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
+        if not ok:
+            return
+        try:
+            api("POST", f"/internal/cameras/{self.cam_id}/frame", json={
+                "image_b64": base64.b64encode(buf.tobytes()).decode(),
+                "ts": datetime.now(timezone.utc).isoformat(),
+            }, timeout=30)
+        except requests.RequestException:
+            pass
 
     def ingest(self, frame) -> bool:
         ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
@@ -145,6 +159,7 @@ class CameraWorker(threading.Thread):
         sample_interval = 1.0 / SAMPLE_FPS
         next_sample = time.monotonic()
         last_ingest = 0.0
+        last_preview = 0.0
         motion_streak = 0
         read_errors = 0
         warmup_frames = int(SAMPLE_FPS * 3)  # let the background model settle
@@ -171,6 +186,11 @@ class CameraWorker(threading.Thread):
             if frame.shape[1] > MAX_FRAME_WIDTH:
                 scale = MAX_FRAME_WIDTH / frame.shape[1]
                 frame = cv2.resize(frame, (MAX_FRAME_WIDTH, int(frame.shape[0] * scale)))
+
+            # periodic preview still for the UI (independent of motion/VLM)
+            if time.monotonic() - last_preview >= PREVIEW_INTERVAL:
+                self.push_preview(frame)
+                last_preview = time.monotonic()
 
             fg = subtractor.apply(frame)
             if warmup_frames > 0:

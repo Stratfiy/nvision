@@ -50,11 +50,7 @@ export default function Cameras() {
           {cams.map((c) => (
             <div key={c.id} className="nv-card overflow-hidden relative group" data-testid={`camera-card-${c.id}`}>
               <div className="aspect-video bg-[#0a0a0a] relative nv-scanlines">
-                {c.snapshot_url ? (
-                  <img src={c.snapshot_url} alt={c.name} className="w-full h-full object-cover" onError={(e)=>{e.currentTarget.style.display='none';}}/>
-                ) : (
-                  <div className="w-full h-full grid place-items-center text-[#525252]"><Cctv size={30} strokeWidth={1.2}/></div>
-                )}
+                <CameraPreview camera={c} />
                 <div className="absolute top-2 left-2 flex items-center gap-1.5 bg-black/60 backdrop-blur px-2 py-0.5">
                   <span className={`w-1.5 h-1.5 rounded-full ${c.status==="online" ? "nv-live-dot" : "bg-[#525252]"}`} />
                   <span className="font-mono text-[10px] tracking-widest">{c.status?.toUpperCase()}</span>
@@ -149,6 +145,28 @@ function AddCameraModal({ onClose }) {
       </div>
     </div>
   );
+}
+
+function CameraPreview({ camera }) {
+  // Show the latest still the worker captured from the RTSP stream, refreshing
+  // periodically for a near-live view. Falls back to snapshot_url, then an icon.
+  const [frame, setFrame] = useState(null);
+
+  useEffect(() => {
+    let alive = true;
+    const load = () => api.get(`/cameras/${camera.id}/snapshot`)
+      .then((r) => { if (alive && r.data?.image_b64) setFrame(`data:image/jpeg;base64,${r.data.image_b64}`); })
+      .catch(() => {});
+    load();
+    const t = setInterval(load, 8000);
+    return () => { alive = false; clearInterval(t); };
+  }, [camera.id]);
+
+  const src = frame || camera.snapshot_url;
+  if (src) {
+    return <img src={src} alt={camera.name} className="w-full h-full object-cover" onError={(e)=>{e.currentTarget.style.display='none';}}/>;
+  }
+  return <div className="w-full h-full grid place-items-center text-[#525252]"><Cctv size={30} strokeWidth={1.2}/></div>;
 }
 
 function EditRtspModal({ camera, onClose }) {

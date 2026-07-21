@@ -13,3 +13,4 @@
 - Cooldown: `detections.cooldown_seconds` (default 120), enforced backend-side in the ingest path via `last_fired_at`.
 - Worker env knobs: `BACKEND_URL`, `WORKER_TOKEN`, `MOTION_MIN_AREA_PCT` (default 0.5), `MOTION_SUSTAINED_FRAMES` (default 2), `SAMPLE_FPS` (2–5), `MAX_FRAME_WIDTH` (640), `POLL_INTERVAL_SECONDS`.
 - Camera status: worker emits `camera.online`/`camera.offline` heartbeats to `POST /api/internal/cameras/{id}/status` after 3 failed reconnect attempts (offline) / on recovery (online).
+- Live preview: the browser never plays raw RTSP (cost model). Instead the worker pushes a periodic still (`PREVIEW_INTERVAL_SECONDS`, default 15) to `POST /api/internal/cameras/{id}/frame`; the backend stores it as `latest_frame_b64` and serves it via `GET /api/cameras/{id}/snapshot`. The camera card refreshes this every 8s (near-live thumbnail) and the Zone Editor uses it as the drawing canvas. `latest_frame_b64` is never included in `/cameras` list/get responses.
