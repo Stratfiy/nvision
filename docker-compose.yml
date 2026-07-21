@@ -1,0 +1,55 @@
+services:
+  mongo:
+    image: mongo:7
+    volumes:
+      - mongo_data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.runCommand({ping: 1})"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  backend:
+    build: ./backend
+    ports:
+      - "8000:8000"
+    environment:
+      MONGO_URL: mongodb://mongo:27017
+      DB_NAME: ${DB_NAME:-nvision}
+      JWT_SECRET: ${JWT_SECRET:-devsecret-change-me}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      NVISION_MASTER_KEY: ${NVISION_MASTER_KEY:-}
+      WORKER_TOKEN: ${WORKER_TOKEN:-dev-worker-token}
+      CORS_ORIGINS: ${CORS_ORIGINS:-*}
+      RAZORPAY_KEY_ID: ${RAZORPAY_KEY_ID:-}
+      RAZORPAY_KEY_SECRET: ${RAZORPAY_KEY_SECRET:-}
+    depends_on:
+      mongo:
+        condition: service_healthy
+
+  worker:
+    build: ./worker
+    environment:
+      BACKEND_URL: http://backend:8000
+      WORKER_TOKEN: ${WORKER_TOKEN:-dev-worker-token}
+      SAMPLE_FPS: ${SAMPLE_FPS:-3}
+      MAX_FRAME_WIDTH: ${MAX_FRAME_WIDTH:-640}
+      MOTION_MIN_AREA_PCT: ${MOTION_MIN_AREA_PCT:-0.5}
+      MOTION_SUSTAINED_FRAMES: ${MOTION_SUSTAINED_FRAMES:-2}
+      INGEST_MIN_INTERVAL_SECONDS: ${INGEST_MIN_INTERVAL_SECONDS:-20}
+    depends_on:
+      - backend
+
+  frontend:
+    build: ./frontend
+    ports:
+      - "3000:3000"
+    environment:
+      # The browser talks to the backend directly on the published port
+      REACT_APP_BACKEND_URL: ${REACT_APP_BACKEND_URL:-http://localhost:8000}
+    depends_on:
+      - backend
+
+volumes:
+  mongo_data:
