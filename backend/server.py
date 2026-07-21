@@ -30,7 +30,12 @@ MONGO_URL = os.environ['MONGO_URL']
 DB_NAME = os.environ['DB_NAME']
 JWT_SECRET = os.environ.get('JWT_SECRET', 'devsecret')
 JWT_ALGO = os.environ.get('JWT_ALGORITHM', 'HS256')
-EMERGENT_LLM_KEY = os.environ.get('EMERGENT_LLM_KEY', '')
+GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY', '')
+GEMINI_MODEL = os.environ.get('GEMINI_MODEL', 'gemini-flash-latest')
+ANTHROPIC_API_KEY = os.environ.get('ANTHROPIC_API_KEY', '')
+ANTHROPIC_MODEL = os.environ.get('ANTHROPIC_MODEL', 'claude-opus-4-8')
+NVISION_MASTER_KEY = os.environ.get('NVISION_MASTER_KEY', '')
+WORKER_TOKEN = os.environ.get('WORKER_TOKEN', '')
 RAZORPAY_KEY_ID = os.environ.get('RAZORPAY_KEY_ID', '')
 RAZORPAY_KEY_SECRET = os.environ.get('RAZORPAY_KEY_SECRET', '')
 RAZORPAY_WEBHOOK_SECRET = os.environ.get('RAZORPAY_WEBHOOK_SECRET', '')
@@ -46,6 +51,53 @@ security = HTTPBearer(auto_error=False)
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("nvision")
+
+
+# ========================= SECRETS (Fernet) =========================
+from cryptography.fernet import Fernet, InvalidToken
+
+_fernet = None
+if NVISION_MASTER_KEY:
+    try:
+        _fernet = Fernet(NVISION_MASTER_KEY.encode())
+    except Exception:
+        logger.error("NVISION_MASTER_KEY is not a valid Fernet key — run backend/scripts/generate_master_key.py")
+
+def encrypt_secret(value: str) -> str:
+    if not _fernet:
+        raise HTTPException(500, "NVISION_MASTER_KEY not configured — cannot store secrets")
+    return _fernet.encrypt(value.encode()).decode()
+
+def decrypt_secret(value: str) -> str:
+    """Decrypt a stored secret. Tolerates legacy plaintext values."""
+    if not isinstance(value, str) or not value:
+        return value
+    if not _fernet:
+        return value
+    try:
+        return _fernet.decrypt(value.encode()).decode()
+    except (InvalidToken, ValueError, TypeError):
+        return value
+
+
+# ========================= RTSP MASKING =========================
+_RTSP_CRED_RE = re.compile(r'((?:rtsp|rtsps|rtmp|http|https)://)([^/@:\s]+)(?::[^/@\s]+)?@')
+
+def mask_stream_url(url: Optional[str]) -> Optional[str]:
+    """rtsp://user:secret@host/... -> rtsp://user:•••@host/... (never expose credentials)."""
+    if not url:
+        return url
+    return _RTSP_CRED_RE.sub(r'\1\2:•••@', url)
+
+def public_camera(cam: Dict[str, Any]) -> Dict[str, Any]:
+    """Camera doc safe for API responses/logs: credentials in stream URLs are masked."""
+    if not cam:
+        return cam
+    out = dict(cam)
+    out.pop("_id", None)
+    if out.get("rtsp_url"):
+        out["rtsp_url"] = mask_stream_url(out["rtsp_url"])
+    return out
 
 
 # ========================= HELPERS =========================
@@ -103,6 +155,7 @@ class CameraIn(BaseModel):
 
 class CameraPatch(BaseModel):
     name: Optional[str] = None
+    rtsp_url: Optional[str] = None
     snapshot_url: Optional[str] = None
     zones: Optional[List[Dict[str, Any]]] = None
 
@@ -116,6 +169,7 @@ class DetectionIn(BaseModel):
     schedule: Optional[str] = "always"          # always | night | business_hours | custom
     zones: List[Dict[str, Any]] = []
     enabled: bool = True
+    cooldown_seconds: int = 120                 # skip VLM re-eval within this window after a fire
 
 class AnalyzeIn(BaseModel):
     detection_id: str
@@ -190,13 +244,31 @@ TEMPLATES = [
 
 
 # ========================= AI (Vision + Memory Q&A) =========================
+_genai_client = None
+
+def _get_genai_client():
+    global _genai_client
+    if _genai_client is None:
+        from google import genai
+        _genai_client = genai.Client(api_key=GEMINI_API_KEY)
+    return _genai_client
+
+
+def _guess_image_mime(b64: str) -> str:
+    head = b64[:16]
+    if head.startswith("iVBOR"):
+        return "image/png"
+    if head.startswith("R0lGOD"):
+        return "image/gif"
+    if head.startswith("UklGR"):
+        return "image/webp"
+    return "image/jpeg"
+
+
 async def run_vision_detection(prompt: str, image_b64: str, sample_b64s: List[str], sensitivity: float, zones: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
-    """Analyze image with Gemini 3 Flash vision, return {match, confidence, caption, objects}."""
-    try:
-        from emergentintegrations.llm.chat import LlmChat, UserMessage, ImageContent
-    except Exception as e:
-        logger.exception("emergentintegrations import failed")
-        return {"match": False, "confidence": 0.0, "caption": f"AI unavailable: {e}", "objects": []}
+    """Analyze image with Gemini Flash vision, return {match, confidence, caption, objects}."""
+    if not GEMINI_API_KEY:
+        return {"match": False, "confidence": 0.0, "caption": "AI unavailable: GEMINI_API_KEY not configured", "objects": []}
 
     zones_note = ""
     if zones:
@@ -219,26 +291,32 @@ async def run_vision_detection(prompt: str, image_b64: str, sample_b64s: List[st
         f"Be strict — the user's sensitivity threshold is {sensitivity:.2f}. Only report match=true when the described condition is genuinely present. "
         "Do not include markdown fences or prose outside JSON."
     )
-    chat = LlmChat(
-        api_key=EMERGENT_LLM_KEY,
-        session_id=f"detect-{new_id()}",
-        system_message=system,
-    ).with_model("gemini", "gemini-3-flash-preview")
+    from google.genai import types as genai_types
 
-    contents = []
-    for sb in sample_b64s[:4]:
-        contents.append(ImageContent(image_base64=sb))
-    contents.append(ImageContent(image_base64=image_b64))
+    contents: List[Any] = []
+    for sb in sample_b64s[:6]:
+        if sb.startswith("data:"):
+            sb = sb.split(",", 1)[-1]
+        contents.append(genai_types.Part.from_bytes(data=base64.b64decode(sb), mime_type=_guess_image_mime(sb)))
+    contents.append(genai_types.Part.from_bytes(data=base64.b64decode(image_b64), mime_type=_guess_image_mime(image_b64)))
 
     user_text = (
         f"Detection prompt: {prompt}{zones_note}\n\n"
         f"{'The first images are REFERENCE samples showing what to look for. The LAST image is the LIVE frame to analyze.' if sample_b64s else 'The image is the LIVE camera frame to analyze.'}\n\n"
         f"Respond with JSON only, e.g. {{\"match\": false, \"confidence\": 0.12, \"caption\": \"Empty corridor at night.\", \"objects\": [\"corridor\", \"door\"]}}"
     )
+    contents.append(user_text)
 
     try:
-        resp = await chat.send_message(UserMessage(text=user_text, file_contents=contents))
-        text = str(resp)
+        resp = await _get_genai_client().aio.models.generate_content(
+            model=GEMINI_MODEL,
+            contents=contents,
+            config=genai_types.GenerateContentConfig(
+                system_instruction=system,
+                response_mime_type="application/json",
+            ),
+        )
+        text = resp.text or ""
         m = re.search(r'\{.*\}', text, re.DOTALL)
         if not m:
             return {"match": False, "confidence": 0.0, "caption": "Model returned non-JSON.", "objects": []}
@@ -254,12 +332,18 @@ async def run_vision_detection(prompt: str, image_b64: str, sample_b64s: List[st
         return {"match": False, "confidence": 0.0, "caption": f"Detection error: {e}", "objects": []}
 
 
+_anthropic_client = None
+
+def _get_anthropic_client():
+    global _anthropic_client
+    if _anthropic_client is None:
+        import anthropic
+        _anthropic_client = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
+    return _anthropic_client
+
+
 async def answer_memory(question: str, events: List[Dict[str, Any]]) -> str:
-    """Use Claude Sonnet to answer a memory question over retrieved event captions."""
-    try:
-        from emergentintegrations.llm.chat import LlmChat, UserMessage
-    except Exception:
-        return "AI unavailable."
+    """Use Claude to answer a memory question over retrieved event captions."""
     if not events:
         return "No events matched your question in memory."
 
@@ -268,19 +352,23 @@ async def answer_memory(question: str, events: List[Dict[str, Any]]) -> str:
         lines.append(f"[{e.get('timestamp','')}] Camera={e.get('camera_name','?')} match={e.get('match')} conf={e.get('confidence',0):.2f} — {e.get('caption','')}")
     context = "\n".join(lines)
 
-    chat = LlmChat(
-        api_key=EMERGENT_LLM_KEY,
-        session_id=f"memq-{new_id()}",
-        system_message=(
-            "You are NVision Memory — an assistant that answers questions about camera events. "
-            "Answer using ONLY the event log provided. If the log does not answer the question, say so. "
-            "Cite timestamps (like 2026-02-15T18:30) inline. Keep the answer under 120 words."
-        ),
-    ).with_model("anthropic", "claude-sonnet-4-6")
+    if not ANTHROPIC_API_KEY:
+        # Degraded mode: no LLM available — return the matched log directly.
+        return "AI memory answers are disabled (ANTHROPIC_API_KEY not set). Matching events:\n" + context[:1800]
 
     try:
-        resp = await chat.send_message(UserMessage(text=f"EVENT LOG:\n{context}\n\nQUESTION: {question}"))
-        return str(resp)[:2000]
+        resp = await _get_anthropic_client().messages.create(
+            model=ANTHROPIC_MODEL,
+            max_tokens=1024,
+            system=(
+                "You are NVision Memory — an assistant that answers questions about camera events. "
+                "Answer using ONLY the event log provided. If the log does not answer the question, say so. "
+                "Cite timestamps (like 2026-02-15T18:30) inline. Keep the answer under 120 words."
+            ),
+            messages=[{"role": "user", "content": f"EVENT LOG:\n{context}\n\nQUESTION: {question}"}],
+        )
+        answer = "".join(b.text for b in resp.content if b.type == "text")
+        return answer[:2000] if answer else "No answer generated."
     except Exception as e:
         logger.exception("memory answer failed")
         return f"AI error: {e}"
@@ -320,7 +408,7 @@ async def add_credits(user_id: str, amount: int, reason: str):
     })
 
 
-async def dispatch_alert(user_id: str, channel: Dict[str, Any], subject: str, body: str, snapshot_url: Optional[str] = None) -> Dict[str, Any]:
+async def dispatch_alert(user_id: str, channel: Dict[str, Any], subject: str, body: str, snapshot_url: Optional[str] = None, snapshot_b64: Optional[str] = None) -> Dict[str, Any]:
     """Fires an alert. Slack/Webhook + Twilio/Plivo/Exotel BYO are REAL; email/teams remain simulated."""
     kind = channel.get("kind")
     cfg = channel.get("config", {})
@@ -346,7 +434,7 @@ async def dispatch_alert(user_id: str, channel: Dict[str, Any], subject: str, bo
             secret = cfg.get("secret", "")
             if not url:
                 return {"status": "error", "detail": "missing url"}
-            payload = {"subject": subject, "body": body, "snapshot_url": snapshot_url, "ts": now_iso()}
+            payload = {"subject": subject, "body": body, "snapshot_url": snapshot_url, "snapshot_b64": snapshot_b64, "ts": now_iso()}
             body_b = json.dumps(payload).encode()
             headers = {"Content-Type": "application/json"}
             if secret:
@@ -397,7 +485,10 @@ async def dispatch_alert(user_id: str, channel: Dict[str, Any], subject: str, bo
 
 
 async def _send_via_provider(provider: str, keys: Dict[str, Any], kind: str, to: str, msg: str) -> Dict[str, Any]:
-    """Real dispatch via user's BYO provider keys. Returns {status, detail}."""
+    """Real dispatch via user's BYO provider keys. Returns {status, detail}.
+    Stored keys are Fernet ciphertext — decrypted here, at dispatch time only."""
+    keys = {fk: (decrypt_secret(fv) if isinstance(fv, str) else fv) for fk, fv in keys.items()}
+
     def _run():
         if provider == "twilio":
             sid = keys.get("sid") or keys.get("account_sid")
@@ -567,30 +658,32 @@ async def create_camera(body: CameraIn, user=Depends(current_user)):
         "created_at": now_iso(),
     }
     await db.cameras.insert_one(doc)
-    doc.pop("_id", None)
-    return doc
+    return public_camera(doc)
 
 @api.patch("/cameras/{cid}")
 async def update_camera(cid: str, body: CameraPatch, user=Depends(current_user)):
     updates = {k: v for k, v in body.model_dump(exclude_none=True).items()}
+    # Never store a masked URL echoed back from a previous response
+    if "rtsp_url" in updates and "•••" in updates["rtsp_url"]:
+        updates.pop("rtsp_url")
     if updates:
         await db.cameras.update_one({"id": cid, "user_id": user["id"]}, {"$set": updates})
     cam = await db.cameras.find_one({"id": cid, "user_id": user["id"]}, {"_id": 0})
     if not cam:
         raise HTTPException(404, "Camera not found")
-    return cam
+    return public_camera(cam)
 
 @api.get("/cameras")
 async def list_cameras(user=Depends(current_user)):
     cams = await db.cameras.find({"user_id": user["id"]}, {"_id": 0}).sort("created_at", -1).to_list(500)
-    return cams
+    return [public_camera(c) for c in cams]
 
 @api.get("/cameras/{cid}")
 async def get_camera(cid: str, user=Depends(current_user)):
     cam = await db.cameras.find_one({"id": cid, "user_id": user["id"]}, {"_id": 0})
     if not cam:
         raise HTTPException(404, "Camera not found")
-    return cam
+    return public_camera(cam)
 
 @api.delete("/cameras/{cid}")
 async def delete_camera(cid: str, user=Depends(current_user)):
@@ -615,7 +708,8 @@ async def create_detection(body: DetectionIn, user=Depends(current_user)):
         "sample_images_b64": body.sample_images_b64[:6], "template": body.template,
         "sensitivity": body.sensitivity, "schedule": body.schedule, "zones": body.zones,
         "enabled": body.enabled, "created_at": now_iso(),
-        "fires_count": 0,
+        "cooldown_seconds": body.cooldown_seconds,
+        "fires_count": 0, "last_fired_at": None,
     }
     await db.detections.insert_one(doc)
     doc.pop("_id", None)
@@ -635,7 +729,7 @@ async def get_detection(did: str, user=Depends(current_user)):
 
 @api.patch("/detections/{did}")
 async def update_detection(did: str, body: Dict[str, Any], user=Depends(current_user)):
-    allowed = {"enabled", "sensitivity", "prompt", "name", "schedule"}
+    allowed = {"enabled", "sensitivity", "prompt", "name", "schedule", "cooldown_seconds"}
     updates = {k: v for k, v in body.items() if k in allowed}
     if updates:
         await db.detections.update_one({"id": did, "user_id": user["id"]}, {"$set": updates})
@@ -659,6 +753,53 @@ async def _fetch_image_url_to_b64(url: str) -> Optional[str]:
     except Exception:
         return None
 
+async def run_detection_pipeline(user_id: str, det: Dict[str, Any], cam: Dict[str, Any], img_b64: str, source: str = "api") -> Dict[str, Any]:
+    """Shared analyze path: credits -> VLM -> event -> alert fan-out.
+    Used by the public /analyze endpoint and the worker ingest path."""
+    ok = await deduct_credits(user_id, CREDIT_COSTS["vlm_eval"], f"vlm:{det['name']}")
+    if not ok:
+        logger.info("vlm skipped (insufficient credits) user=%s detection=%s", user_id, det["id"])
+        return {"error": "insufficient_credits"}
+
+    result = await run_vision_detection(
+        det["prompt"], img_b64, det.get("sample_images_b64", []),
+        det.get("sensitivity", 0.6),
+        zones=cam.get("zones") or [],
+    )
+    is_match = result["match"] and result["confidence"] >= det.get("sensitivity", 0.6)
+    logger.info("vlm eval source=%s camera=%s detection=%s match=%s conf=%.2f", source, cam["id"], det["id"], is_match, result["confidence"])
+
+    event = {
+        "id": new_id(), "user_id": user_id, "detection_id": det["id"],
+        "detection_name": det["name"], "camera_id": cam["id"], "camera_name": cam["name"],
+        "timestamp": now_iso(), "match": is_match, "confidence": result["confidence"],
+        "caption": result["caption"], "objects": result["objects"],
+        "snapshot_b64": img_b64[:250000],  # cap to ~250KB base64
+        "source": source,
+        "feedback": None, "acknowledged": False,
+    }
+    await db.events.insert_one(event)
+
+    dispatched = []
+    if is_match:
+        await db.detections.update_one({"id": det["id"]}, {"$inc": {"fires_count": 1}, "$set": {"last_fired_at": now_iso()}})
+        # fan out to all enabled channels
+        channels = await db.channels.find({"user_id": user_id, "enabled": {"$ne": False}}, {"_id": 0}).to_list(50)
+        for ch in channels:
+            r = await dispatch_alert(
+                user_id, ch,
+                subject=f"NVision Alert: {det['name']}",
+                body=f"[{cam['name']}] {result['caption']} (confidence {result['confidence']:.0%})",
+                snapshot_url=None,
+                snapshot_b64=img_b64[:250000],
+            )
+            dispatched.append({"channel": ch["name"], "kind": ch["kind"], **r})
+
+    event.pop("_id", None)
+    event.pop("snapshot_b64", None)  # don't ship base64 back
+    return {"event": event, "dispatched": dispatched}
+
+
 @api.post("/analyze")
 async def analyze(body: AnalyzeIn, user=Depends(current_user)):
     det = await db.detections.find_one({"id": body.detection_id, "user_id": user["id"]})
@@ -680,46 +821,116 @@ async def analyze(body: AnalyzeIn, user=Depends(current_user)):
     if img_b64.startswith("data:"):
         img_b64 = img_b64.split(",", 1)[-1]
 
-    # credits
-    ok = await deduct_credits(user["id"], CREDIT_COSTS["vlm_eval"], f"vlm:{det['name']}")
-    if not ok:
+    out = await run_detection_pipeline(user["id"], det, cam, img_b64, source="api")
+    if out.get("error") == "insufficient_credits":
         raise HTTPException(402, "Insufficient credits. Please top up.")
+    return out
 
-    # run vision
-    result = await run_vision_detection(
-        det["prompt"], img_b64, det.get("sample_images_b64", []),
-        det.get("sensitivity", 0.6),
-        zones=cam.get("zones") or [],
-    )
-    is_match = result["match"] and result["confidence"] >= det.get("sensitivity", 0.6)
 
-    event = {
-        "id": new_id(), "user_id": user["id"], "detection_id": det["id"],
-        "detection_name": det["name"], "camera_id": cam["id"], "camera_name": cam["name"],
-        "timestamp": now_iso(), "match": is_match, "confidence": result["confidence"],
-        "caption": result["caption"], "objects": result["objects"],
-        "snapshot_b64": img_b64[:250000],  # cap to ~250KB base64
-        "feedback": None, "acknowledged": False,
-    }
-    await db.events.insert_one(event)
+# ========================= INTERNAL (worker) =========================
+class IngestIn(BaseModel):
+    camera_id: str
+    image_b64: str
+    ts: Optional[str] = None
+
+class CameraStatusIn(BaseModel):
+    status: str                                  # online | offline
+
+
+async def worker_auth(x_worker_token: Optional[str] = Header(None)):
+    if not WORKER_TOKEN:
+        raise HTTPException(503, "WORKER_TOKEN not configured on backend")
+    if not x_worker_token or not hmac.compare_digest(x_worker_token, WORKER_TOKEN):
+        raise HTTPException(401, "Invalid worker token")
+
+
+def _within_cooldown(det: Dict[str, Any]) -> bool:
+    last_fired = det.get("last_fired_at")
+    if not last_fired:
+        return False
+    cooldown = int(det.get("cooldown_seconds", 120) or 0)
+    if cooldown <= 0:
+        return False
+    try:
+        last = datetime.fromisoformat(last_fired)
+        if last.tzinfo is None:
+            last = last.replace(tzinfo=timezone.utc)
+    except ValueError:
+        return False
+    return (datetime.now(timezone.utc) - last).total_seconds() < cooldown
+
+
+@api.get("/internal/cameras/active", dependencies=[Depends(worker_auth)])
+async def internal_active_cameras():
+    """Cameras with an RTSP URL and at least one enabled detection. Worker-only: returns raw RTSP URLs."""
+    cams = await db.cameras.find({"rtsp_url": {"$nin": [None, ""]}}, {"_id": 0}).to_list(1000)
+    out = []
+    for cam in cams:
+        n = await db.detections.count_documents({"camera_id": cam["id"], "enabled": True})
+        if n > 0:
+            out.append({
+                "id": cam["id"], "user_id": cam["user_id"], "name": cam["name"],
+                "rtsp_url": cam["rtsp_url"], "status": cam.get("status", "unknown"),
+                "detections_enabled": n,
+            })
+    return out
+
+
+@api.post("/internal/ingest", dependencies=[Depends(worker_auth)])
+async def internal_ingest(body: IngestIn):
+    """Worker posts a motion-qualified frame. Runs every enabled detection on the camera,
+    enforcing the per-detection cooldown backend-side."""
+    cam = await db.cameras.find_one({"id": body.camera_id})
+    if not cam:
+        raise HTTPException(404, "Camera not found")
+
+    img_b64 = body.image_b64
+    if img_b64.startswith("data:"):
+        img_b64 = img_b64.split(",", 1)[-1]
+
+    dets = await db.detections.find({"camera_id": cam["id"], "enabled": True}, {"_id": 0}).to_list(100)
+    results = []
+    for det in dets:
+        if _within_cooldown(det):
+            logger.info("cooldown skip camera=%s detection=%s cooldown=%ss last_fired=%s",
+                        cam["id"], det["id"], det.get("cooldown_seconds", 120), det.get("last_fired_at"))
+            results.append({"detection_id": det["id"], "skipped": "cooldown"})
+            continue
+        out = await run_detection_pipeline(cam["user_id"], det, cam, img_b64, source="worker")
+        if out.get("error"):
+            results.append({"detection_id": det["id"], "skipped": out["error"]})
+        else:
+            results.append({"detection_id": det["id"], "match": out["event"]["match"], "confidence": out["event"]["confidence"]})
+    logger.info("ingest camera=%s detections=%d ts=%s", cam["id"], len(dets), body.ts or now_iso())
+    return {"camera_id": cam["id"], "results": results}
+
+
+@api.post("/internal/cameras/{cid}/status", dependencies=[Depends(worker_auth)])
+async def internal_camera_status(cid: str, body: CameraStatusIn):
+    """Worker heartbeat: camera.online / camera.offline. Fires an offline alert on transition."""
+    if body.status not in ("online", "offline"):
+        raise HTTPException(400, "status must be online|offline")
+    cam = await db.cameras.find_one({"id": cid})
+    if not cam:
+        raise HTTPException(404, "Camera not found")
+    prev = cam.get("status", "unknown")
+    if prev == body.status:
+        return {"ok": True, "status": body.status, "changed": False}
+
+    await db.cameras.update_one({"id": cid}, {"$set": {"status": body.status, "status_changed_at": now_iso()}})
+    logger.info("camera status change camera=%s %s -> %s", cid, prev, body.status)
 
     dispatched = []
-    if is_match:
-        await db.detections.update_one({"id": det["id"]}, {"$inc": {"fires_count": 1}})
-        # fan out to all enabled channels
-        channels = await db.channels.find({"user_id": user["id"], "enabled": {"$ne": False}}, {"_id": 0}).to_list(50)
+    if body.status == "offline":
+        channels = await db.channels.find({"user_id": cam["user_id"], "enabled": {"$ne": False}}, {"_id": 0}).to_list(50)
         for ch in channels:
             r = await dispatch_alert(
-                user["id"], ch,
-                subject=f"NVision Alert: {det['name']}",
-                body=f"[{cam['name']}] {result['caption']} (confidence {result['confidence']:.0%})",
-                snapshot_url=None,
+                cam["user_id"], ch,
+                subject=f"NVision: camera offline — {cam['name']}",
+                body=f"Camera '{cam['name']}' stopped responding and is now marked offline.",
             )
             dispatched.append({"channel": ch["name"], "kind": ch["kind"], **r})
-
-    event.pop("_id", None)
-    event.pop("snapshot_b64", None)  # don't ship base64 back
-    return {"event": event, "dispatched": dispatched}
+    return {"ok": True, "status": body.status, "changed": True, "dispatched": dispatched}
 
 
 # ========================= EVENTS =========================
@@ -1021,18 +1232,24 @@ async def analytics_summary(user=Depends(current_user)):
 async def get_byo(user=Depends(current_user)):
     u = await db.users.find_one({"id": user["id"]}, {"_id": 0})
     byo = u.get("byo_keys", {}) or {}
-    # mask each provider's fields
+    # decrypt (stored values are Fernet ciphertext), then mask each provider's fields
+    def _mask(fv):
+        if not isinstance(fv, str) or not fv:
+            return "•••" if fv else ""
+        plain = decrypt_secret(fv)
+        return (plain[:4] + "…" + plain[-3:]) if len(plain) > 8 else "•••"
     masked = {}
     for prov, v in byo.items():
         if isinstance(v, dict):
-            masked[prov] = {fk: ((fv[:4] + "…" + fv[-3:]) if isinstance(fv, str) and len(fv) > 8 else ("•••" if fv else "")) for fk, fv in v.items()}
+            masked[prov] = {fk: _mask(fv) for fk, fv in v.items()}
         elif isinstance(v, str):
-            masked[prov] = (v[:4] + "…" + v[-3:]) if len(v) > 8 else ("•••" if v else "")
+            masked[prov] = _mask(v)
     return {"keys": masked}
 
 @api.post("/settings/byo")
 async def set_byo(body: Dict[str, Any], user=Depends(current_user)):
-    """Body: {provider: {field: value, ...}} — merges into user.byo_keys.<provider>"""
+    """Body: {provider: {field: value, ...}} — merges into user.byo_keys.<provider>.
+    Values are encrypted at rest with Fernet (NVISION_MASTER_KEY)."""
     updates: Dict[str, Any] = {}
     allowed = {"openai", "anthropic", "gemini", "twilio", "plivo", "exotel", "vonage", "messagebird"}
     for prov, v in body.items():
@@ -1040,10 +1257,10 @@ async def set_byo(body: Dict[str, Any], user=Depends(current_user)):
             continue
         if isinstance(v, dict):
             for fk, fv in v.items():
-                if fv:
-                    updates[f"byo_keys.{prov}.{fk}"] = fv
+                if fv and isinstance(fv, str) and "…" not in fv and fv != "•••":
+                    updates[f"byo_keys.{prov}.{fk}"] = encrypt_secret(fv)
         elif isinstance(v, str) and v:
-            updates[f"byo_keys.{prov}"] = v
+            updates[f"byo_keys.{prov}"] = encrypt_secret(v)
     if updates:
         await db.users.update_one({"id": user["id"]}, {"$set": updates})
     return {"ok": True}
