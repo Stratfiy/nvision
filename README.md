@@ -14,6 +14,26 @@ RTSP camera ──> worker (OpenCV: downscale ≤640px, 2-5fps, MOG2 motion gate
 
 **Cost model:** the VLM is never called continuously. The worker only forwards frames after sustained motion, and the backend enforces a per-detection cooldown (default 120s) after each fire.
 
+## Deploy on a server (EC2) in 3 commands
+
+On a fresh Ubuntu instance with Docker installed (`sudo apt-get install -y docker.io docker-compose-v2 git`):
+
+```bash
+git clone https://github.com/Stratfiy/nvision.git && cd nvision
+git checkout claude/nvision-rtsp-realtime-ld6qtc
+bash scripts/setup-env.sh              # generates secrets + detects public IP (Elastic IP if attached)
+docker compose up -d --build
+```
+
+`scripts/setup-env.sh` writes `.env` for you — it generates `NVISION_MASTER_KEY` and `WORKER_TOKEN`, auto-detects the instance's public IP for `REACT_APP_BACKEND_URL`, and **leaves `GEMINI_API_KEY` blank on purpose**. Pass an IP explicitly if you don't want auto-detection: `bash scripts/setup-env.sh <YOUR_ELASTIC_IP>`.
+
+Then:
+1. Open the security group for inbound **TCP 3000 and 8000**.
+2. Browse to `http://<PUBLIC_IP>:3000`, sign up.
+3. Add your Gemini key in the UI: **Settings → BYO Provider Keys → Google Gemini** (encrypted at rest; no key ever touches the shell or git).
+
+Secrets never go in git — `.env` is generated on the box and `.gitignore`d.
+
 ## Run locally in 5 minutes
 
 1. **Configure env**
