@@ -1,5 +1,5 @@
 """NVision — AI Vision Platform Backend (MVP v0.1)."""
-from fastapi import FastAPI, APIRouter, HTTPException, Depends, Header, UploadFile, File, Form
+from fastapi import FastAPI, APIRouter, HTTPException, Depends, Header, UploadFile, File, Form, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
@@ -16,6 +16,8 @@ import asyncio
 import bcrypt
 import jwt as pyjwt
 import httpx
+import razorpay
+from twilio.rest import Client as TwilioClient
 from pathlib import Path
 from pydantic import BaseModel, Field, EmailStr, ConfigDict
 from typing import List, Optional, Dict, Any
@@ -29,6 +31,11 @@ DB_NAME = os.environ['DB_NAME']
 JWT_SECRET = os.environ.get('JWT_SECRET', 'devsecret')
 JWT_ALGO = os.environ.get('JWT_ALGORITHM', 'HS256')
 EMERGENT_LLM_KEY = os.environ.get('EMERGENT_LLM_KEY', '')
+RAZORPAY_KEY_ID = os.environ.get('RAZORPAY_KEY_ID', '')
+RAZORPAY_KEY_SECRET = os.environ.get('RAZORPAY_KEY_SECRET', '')
+RAZORPAY_WEBHOOK_SECRET = os.environ.get('RAZORPAY_WEBHOOK_SECRET', '')
+
+rzp = razorpay.Client(auth=(RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET)) if RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET else None
 
 client = AsyncIOMotorClient(MONGO_URL)
 db = client[DB_NAME]
@@ -92,6 +99,12 @@ class CameraIn(BaseModel):
     site: Optional[str] = "Default"
     tags: List[str] = []
     timezone: Optional[str] = "UTC"
+    zones: List[Dict[str, Any]] = []
+
+class CameraPatch(BaseModel):
+    name: Optional[str] = None
+    snapshot_url: Optional[str] = None
+    zones: Optional[List[Dict[str, Any]]] = None
 
 class DetectionIn(BaseModel):
     camera_id: str
@@ -129,6 +142,12 @@ class FeedbackIn(BaseModel):
 
 class TopupIn(BaseModel):
     pack: str                                    # starter | growth | scale
+    origin_url: Optional[str] = None
+
+class RzpVerifyIn(BaseModel):
+    razorpay_order_id: str
+    razorpay_payment_id: str
+    razorpay_signature: str
 
 class ApiKeyIn(BaseModel):
     name: str
@@ -171,13 +190,27 @@ TEMPLATES = [
 
 
 # ========================= AI (Vision + Memory Q&A) =========================
-async def run_vision_detection(prompt: str, image_b64: str, sample_b64s: List[str], sensitivity: float) -> Dict[str, Any]:
+async def run_vision_detection(prompt: str, image_b64: str, sample_b64s: List[str], sensitivity: float, zones: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
     """Analyze image with Gemini 3 Flash vision, return {match, confidence, caption, objects}."""
     try:
         from emergentintegrations.llm.chat import LlmChat, UserMessage, ImageContent
     except Exception as e:
         logger.exception("emergentintegrations import failed")
         return {"match": False, "confidence": 0.0, "caption": f"AI unavailable: {e}", "objects": []}
+
+    zones_note = ""
+    if zones:
+        z_desc = "; ".join(
+            f"'{z.get('name','zone')}' polygon (normalized 0-1): {z.get('points', [])}"
+            for z in zones if z.get("points")
+        )
+        if z_desc:
+            zones_note = (
+                f"\nIMPORTANT — RESTRICTED ZONES: The detection is scoped to these zones only: {z_desc}. "
+                "Coordinates are normalized (0,0)=top-left, (1,1)=bottom-right. "
+                "ONLY report a match if the target is INSIDE one of these polygons. "
+                "Anything outside the zones = no match, regardless of what you see."
+            )
 
     system = (
         "You are NVision, a precise CCTV vision analyzer. "
@@ -198,7 +231,7 @@ async def run_vision_detection(prompt: str, image_b64: str, sample_b64s: List[st
     contents.append(ImageContent(image_base64=image_b64))
 
     user_text = (
-        f"Detection prompt: {prompt}\n\n"
+        f"Detection prompt: {prompt}{zones_note}\n\n"
         f"{'The first images are REFERENCE samples showing what to look for. The LAST image is the LIVE frame to analyze.' if sample_b64s else 'The image is the LIVE camera frame to analyze.'}\n\n"
         f"Respond with JSON only, e.g. {{\"match\": false, \"confidence\": 0.12, \"caption\": \"Empty corridor at night.\", \"objects\": [\"corridor\", \"door\"]}}"
     )
@@ -288,7 +321,7 @@ async def add_credits(user_id: str, amount: int, reason: str):
 
 
 async def dispatch_alert(user_id: str, channel: Dict[str, Any], subject: str, body: str, snapshot_url: Optional[str] = None) -> Dict[str, Any]:
-    """Fires an alert. Slack/Webhook are REAL; email/whatsapp/sms/voice are SIMULATED (logged)."""
+    """Fires an alert. Slack/Webhook + Twilio/Plivo/Exotel BYO are REAL; email/teams remain simulated."""
     kind = channel.get("kind")
     cfg = channel.get("config", {})
     status = "sent"
@@ -324,10 +357,24 @@ async def dispatch_alert(user_id: str, channel: Dict[str, Any], subject: str, bo
                 detail = f"HTTP {r.status_code}"
                 status = "sent" if r.status_code < 400 else "error"
 
-        elif kind in ("email", "whatsapp", "sms", "voice", "teams"):
-            # SIMULATED — logs the alert. Real providers = Phase 2 (BYO keys UI ready).
+        elif kind in ("whatsapp", "sms", "voice"):
+            provider = cfg.get("provider", "twilio")
+            to = cfg.get("to", "")
+            if not to:
+                return {"status": "error", "detail": "missing 'to' number"}
+            user = await db.users.find_one({"id": user_id})
+            byo = (user or {}).get("byo_keys", {}) or {}
+            prov_keys = byo.get(provider)
+            if not isinstance(prov_keys, dict) or not prov_keys:
+                return {"status": "error", "detail": f"No {provider} keys in Settings — add them under BYO Provider Keys"}
+            msg = f"{subject}\n{body}"[:1500]
+            r = await _send_via_provider(provider, prov_keys, kind, to, msg)
+            status, detail = r["status"], r["detail"]
+
+        elif kind in ("email", "teams"):
+            # SIMULATED — Email via Resend/SendGrid and Teams webhook = Phase 2.
             status = "simulated"
-            detail = f"[MOCKED] {kind} to {cfg.get('to') or cfg.get('phone') or cfg.get('email') or cfg.get('channel','?')} — {subject}: {body[:120]}"
+            detail = f"[MOCKED] {kind} to {cfg.get('to') or cfg.get('email') or cfg.get('url','?')} — {subject}: {body[:120]}"
             logger.info(detail)
 
         else:
@@ -343,6 +390,133 @@ async def dispatch_alert(user_id: str, channel: Dict[str, Any], subject: str, bo
         "ts": now_iso(),
     })
     return {"status": status, "detail": detail}
+
+
+async def _send_via_provider(provider: str, keys: Dict[str, Any], kind: str, to: str, msg: str) -> Dict[str, Any]:
+    """Real dispatch via user's BYO provider keys. Returns {status, detail}."""
+    def _run():
+        if provider == "twilio":
+            sid = keys.get("sid") or keys.get("account_sid")
+            token = keys.get("token") or keys.get("auth_token")
+            frm = keys.get("from") or keys.get("from_number", "")
+            if not (sid and token and frm):
+                return {"status": "error", "detail": "twilio: need sid, token, from"}
+            client = TwilioClient(sid, token)
+            if kind == "whatsapp":
+                from_num = frm if frm.startswith("whatsapp:") else f"whatsapp:{frm}"
+                to_num = to if to.startswith("whatsapp:") else f"whatsapp:{to}"
+                m = client.messages.create(from_=from_num, to=to_num, body=msg)
+            elif kind == "sms":
+                m = client.messages.create(from_=frm, to=to, body=msg)
+            elif kind == "voice":
+                twiml = f'<Response><Say voice="alice">{msg[:600]}</Say></Response>'
+                m = client.calls.create(from_=frm, to=to, twiml=twiml)
+            else:
+                return {"status": "error", "detail": f"twilio: unsupported kind {kind}"}
+            return {"status": "sent", "detail": f"twilio sid={m.sid}"}
+
+        elif provider == "plivo":
+            auth_id = keys.get("auth_id") or keys.get("sid")
+            auth_token = keys.get("auth_token") or keys.get("token")
+            frm = keys.get("from") or keys.get("from_number", "")
+            if not (auth_id and auth_token and frm):
+                return {"status": "error", "detail": "plivo: need auth_id, auth_token, from"}
+            import requests as _req
+            if kind == "sms":
+                r = _req.post(
+                    f"https://api.plivo.com/v1/Account/{auth_id}/Message/",
+                    auth=(auth_id, auth_token),
+                    json={"src": frm, "dst": to, "text": msg[:800]},
+                    timeout=10,
+                )
+                if 200 <= r.status_code < 300:
+                    return {"status": "sent", "detail": f"plivo HTTP {r.status_code}"}
+                return {"status": "error", "detail": f"plivo HTTP {r.status_code}: {r.text[:120]}"}
+            elif kind == "whatsapp":
+                # Plivo WhatsApp requires template — sending free-form works only in 24h session
+                r = _req.post(
+                    f"https://api.plivo.com/v1/Account/{auth_id}/Messages/",
+                    auth=(auth_id, auth_token),
+                    json={"src": frm, "dst": to, "type": "whatsapp", "text": msg[:800]},
+                    timeout=10,
+                )
+                if 200 <= r.status_code < 300:
+                    return {"status": "sent", "detail": f"plivo-wa HTTP {r.status_code}"}
+                return {"status": "error", "detail": f"plivo-wa HTTP {r.status_code}: {r.text[:120]}"}
+            else:
+                return {"status": "error", "detail": f"plivo: unsupported kind {kind}"}
+
+        elif provider == "exotel":
+            api_key = keys.get("api_key")
+            api_token = keys.get("api_token") or keys.get("token")
+            account_sid = keys.get("account_sid") or keys.get("sid")
+            frm = keys.get("from") or keys.get("from_number", "")
+            subdomain = keys.get("subdomain", "api.exotel.com")
+            if not (api_key and api_token and account_sid and frm):
+                return {"status": "error", "detail": "exotel: need api_key, api_token, account_sid, from"}
+            import requests as _req
+            if kind == "sms":
+                r = _req.post(
+                    f"https://{subdomain}/v1/Accounts/{account_sid}/Sms/send",
+                    auth=(api_key, api_token),
+                    data={"From": frm, "To": to, "Body": msg[:600]},
+                    timeout=10,
+                )
+                if 200 <= r.status_code < 300:
+                    return {"status": "sent", "detail": f"exotel HTTP {r.status_code}"}
+                return {"status": "error", "detail": f"exotel HTTP {r.status_code}: {r.text[:120]}"}
+            elif kind == "voice":
+                # Exotel Voice Call Connect
+                caller_id = keys.get("caller_id", frm)
+                r = _req.post(
+                    f"https://{subdomain}/v1/Accounts/{account_sid}/Calls/connect",
+                    auth=(api_key, api_token),
+                    data={"From": to, "CallerId": caller_id, "Url": keys.get("call_url", "http://my.exotel.in/exoml/start_voice/12345")},
+                    timeout=10,
+                )
+                if 200 <= r.status_code < 300:
+                    return {"status": "sent", "detail": f"exotel-call HTTP {r.status_code}"}
+                return {"status": "error", "detail": f"exotel-call HTTP {r.status_code}: {r.text[:120]}"}
+            else:
+                return {"status": "error", "detail": f"exotel: unsupported kind {kind}"}
+
+        elif provider == "vonage":
+            api_key = keys.get("api_key")
+            api_secret = keys.get("api_secret")
+            frm = keys.get("from") or keys.get("from_number", "NVision")
+            if not (api_key and api_secret):
+                return {"status": "error", "detail": "vonage: need api_key, api_secret"}
+            import requests as _req
+            if kind == "sms":
+                r = _req.post("https://rest.nexmo.com/sms/json",
+                              data={"api_key": api_key, "api_secret": api_secret, "from": frm, "to": to, "text": msg[:600]},
+                              timeout=10)
+                if 200 <= r.status_code < 300:
+                    return {"status": "sent", "detail": f"vonage HTTP {r.status_code}"}
+                return {"status": "error", "detail": f"vonage HTTP {r.status_code}: {r.text[:120]}"}
+            return {"status": "error", "detail": f"vonage: kind {kind} not wired (SMS supported)"}
+
+        elif provider == "messagebird":
+            api_key = keys.get("api_key")
+            frm = keys.get("from") or keys.get("from_number", "NVision")
+            if not api_key:
+                return {"status": "error", "detail": "messagebird: need api_key"}
+            import requests as _req
+            r = _req.post("https://rest.messagebird.com/messages",
+                          headers={"Authorization": f"AccessKey {api_key}"},
+                          data={"originator": frm, "recipients": to, "body": msg[:600]},
+                          timeout=10)
+            if 200 <= r.status_code < 300:
+                return {"status": "sent", "detail": f"messagebird HTTP {r.status_code}"}
+            return {"status": "error", "detail": f"messagebird HTTP {r.status_code}: {r.text[:120]}"}
+
+        else:
+            return {"status": "error", "detail": f"unknown provider {provider}"}
+
+    try:
+        return await asyncio.to_thread(_run)
+    except Exception as e:
+        return {"status": "error", "detail": str(e)}
 
 
 # ========================= AUTH ROUTES =========================
@@ -384,12 +558,23 @@ async def create_camera(body: CameraIn, user=Depends(current_user)):
         "id": new_id(), "user_id": user["id"], "name": body.name,
         "rtsp_url": body.rtsp_url, "snapshot_url": body.snapshot_url,
         "site": body.site, "tags": body.tags, "timezone": body.timezone,
+        "zones": body.zones,
         "status": "online" if body.snapshot_url or body.rtsp_url else "unknown",
         "created_at": now_iso(),
     }
     await db.cameras.insert_one(doc)
     doc.pop("_id", None)
     return doc
+
+@api.patch("/cameras/{cid}")
+async def update_camera(cid: str, body: CameraPatch, user=Depends(current_user)):
+    updates = {k: v for k, v in body.model_dump(exclude_none=True).items()}
+    if updates:
+        await db.cameras.update_one({"id": cid, "user_id": user["id"]}, {"$set": updates})
+    cam = await db.cameras.find_one({"id": cid, "user_id": user["id"]}, {"_id": 0})
+    if not cam:
+        raise HTTPException(404, "Camera not found")
+    return cam
 
 @api.get("/cameras")
 async def list_cameras(user=Depends(current_user)):
@@ -497,7 +682,11 @@ async def analyze(body: AnalyzeIn, user=Depends(current_user)):
         raise HTTPException(402, "Insufficient credits. Please top up.")
 
     # run vision
-    result = await run_vision_detection(det["prompt"], img_b64, det.get("sample_images_b64", []), det.get("sensitivity", 0.6))
+    result = await run_vision_detection(
+        det["prompt"], img_b64, det.get("sample_images_b64", []),
+        det.get("sensitivity", 0.6),
+        zones=cam.get("zones") or [],
+    )
     is_match = result["match"] and result["confidence"] >= det.get("sensitivity", 0.6)
 
     event = {
@@ -655,12 +844,106 @@ async def credits(user=Depends(current_user)):
 
 @api.post("/credits/topup")
 async def topup(body: TopupIn, user=Depends(current_user)):
-    """MVP: simulated Stripe/Razorpay top-up. In production this returns a Stripe checkout URL."""
+    """Creates a Razorpay Order for a credit pack. Frontend opens Razorpay Checkout and calls /credits/verify on success."""
     pack = CREDIT_PACKS.get(body.pack)
     if not pack:
         raise HTTPException(400, "Unknown pack")
-    await add_credits(user["id"], pack["credits"], f"topup:{body.pack}")
-    return {"ok": True, "added": pack["credits"], "new_balance": (await db.users.find_one({"id": user["id"]}))["credits"]}
+    if not rzp:
+        raise HTTPException(500, "Razorpay not configured (missing RAZORPAY_KEY_ID/SECRET)")
+    amount_paise = int(pack["amount_inr"]) * 100
+    receipt = f"nv_{body.pack}_{new_id()[:8]}"
+    try:
+        order = rzp.order.create({
+            "amount": amount_paise,
+            "currency": "INR",
+            "receipt": receipt,
+            "payment_capture": 1,
+            "notes": {"user_id": user["id"], "pack": body.pack},
+        })
+    except Exception as e:
+        logger.exception("razorpay order failed")
+        raise HTTPException(502, f"Razorpay error: {e}")
+
+    await db.payment_transactions.insert_one({
+        "id": new_id(),
+        "user_id": user["id"],
+        "razorpay_order_id": order["id"],
+        "pack": body.pack,
+        "amount_inr": pack["amount_inr"],
+        "credits": pack["credits"],
+        "status": "created",
+        "created_at": now_iso(),
+    })
+    return {
+        "order_id": order["id"],
+        "amount": amount_paise,
+        "currency": "INR",
+        "key_id": RAZORPAY_KEY_ID,
+        "credits": pack["credits"],
+        "pack": body.pack,
+        "user": {"name": user.get("name",""), "email": user.get("email","")},
+    }
+
+@api.post("/credits/verify")
+async def verify_payment(body: RzpVerifyIn, user=Depends(current_user)):
+    """Verifies Razorpay signature and grants credits."""
+    if not rzp:
+        raise HTTPException(500, "Razorpay not configured")
+    # signature = HMAC_SHA256(order_id + '|' + payment_id, key_secret)
+    expected = hmac.new(
+        RAZORPAY_KEY_SECRET.encode(),
+        f"{body.razorpay_order_id}|{body.razorpay_payment_id}".encode(),
+        hashlib.sha256,
+    ).hexdigest()
+    if not hmac.compare_digest(expected, body.razorpay_signature):
+        raise HTTPException(400, "Invalid Razorpay signature")
+
+    txn = await db.payment_transactions.find_one({"razorpay_order_id": body.razorpay_order_id, "user_id": user["id"]})
+    if not txn:
+        raise HTTPException(404, "Transaction not found")
+    if txn.get("status") == "paid":
+        return {"ok": True, "already": True, "credits": txn["credits"]}
+
+    await db.payment_transactions.update_one(
+        {"_id": txn["_id"]},
+        {"$set": {
+            "status": "paid",
+            "razorpay_payment_id": body.razorpay_payment_id,
+            "razorpay_signature": body.razorpay_signature,
+            "paid_at": now_iso(),
+        }},
+    )
+    await add_credits(user["id"], int(txn["credits"]), f"razorpay_topup:{txn['pack']}")
+    new_bal = (await db.users.find_one({"id": user["id"]}))["credits"]
+    return {"ok": True, "credits_added": txn["credits"], "new_balance": new_bal}
+
+@api.post("/credits/razorpay/webhook")
+async def razorpay_webhook(request: Request):
+    """Optional webhook for reliability."""
+    payload = await request.body()
+    sig = request.headers.get("X-Razorpay-Signature", "")
+    if RAZORPAY_WEBHOOK_SECRET:
+        try:
+            rzp.utility.verify_webhook_signature(payload.decode(), sig, RAZORPAY_WEBHOOK_SECRET)
+        except Exception:
+            raise HTTPException(400, "Invalid signature")
+    try:
+        data = json.loads(payload.decode())
+    except Exception:
+        raise HTTPException(400, "Bad JSON")
+    event = data.get("event", "")
+    if event == "payment.captured":
+        p = data.get("payload", {}).get("payment", {}).get("entity", {})
+        order_id = p.get("order_id")
+        if order_id:
+            txn = await db.payment_transactions.find_one({"razorpay_order_id": order_id, "status": {"$ne": "paid"}})
+            if txn:
+                await db.payment_transactions.update_one(
+                    {"_id": txn["_id"]},
+                    {"$set": {"status": "paid", "razorpay_payment_id": p.get("id"), "paid_at": now_iso()}},
+                )
+                await add_credits(txn["user_id"], int(txn["credits"]), f"razorpay_webhook:{txn['pack']}")
+    return {"status": "ok"}
 
 
 # ========================= API KEYS =========================
@@ -733,14 +1016,30 @@ async def analytics_summary(user=Depends(current_user)):
 @api.get("/settings/byo")
 async def get_byo(user=Depends(current_user)):
     u = await db.users.find_one({"id": user["id"]}, {"_id": 0})
-    byo = u.get("byo_keys", {})
-    # mask keys
-    masked = {k: (v[:4] + "…" + v[-3:]) if v and len(v) > 8 else ("" if not v else "•••") for k, v in byo.items()}
+    byo = u.get("byo_keys", {}) or {}
+    # mask each provider's fields
+    masked = {}
+    for prov, v in byo.items():
+        if isinstance(v, dict):
+            masked[prov] = {fk: ((fv[:4] + "…" + fv[-3:]) if isinstance(fv, str) and len(fv) > 8 else ("•••" if fv else "")) for fk, fv in v.items()}
+        elif isinstance(v, str):
+            masked[prov] = (v[:4] + "…" + v[-3:]) if len(v) > 8 else ("•••" if v else "")
     return {"keys": masked}
 
 @api.post("/settings/byo")
-async def set_byo(body: Dict[str, str], user=Depends(current_user)):
-    updates = {f"byo_keys.{k}": v for k, v in body.items() if k in {"openai", "anthropic", "gemini", "twilio", "plivo", "exotel"}}
+async def set_byo(body: Dict[str, Any], user=Depends(current_user)):
+    """Body: {provider: {field: value, ...}} — merges into user.byo_keys.<provider>"""
+    updates: Dict[str, Any] = {}
+    allowed = {"openai", "anthropic", "gemini", "twilio", "plivo", "exotel", "vonage", "messagebird"}
+    for prov, v in body.items():
+        if prov not in allowed:
+            continue
+        if isinstance(v, dict):
+            for fk, fv in v.items():
+                if fv:
+                    updates[f"byo_keys.{prov}.{fk}"] = fv
+        elif isinstance(v, str) and v:
+            updates[f"byo_keys.{prov}"] = v
     if updates:
         await db.users.update_one({"id": user["id"]}, {"$set": updates})
     return {"ok": True}

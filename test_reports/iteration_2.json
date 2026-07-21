@@ -1,0 +1,33 @@
+{
+  "summary": "Iteration 2 E2E: 31/31 backend pytest (21 regression + 10 new iteration-2). All 3 new features validated end-to-end: (1) Razorpay checkout — /credits/topup returns real order_id starting with 'order_', amount=49900 paise, key_id=rzp_test_*, INR; invalid pack→400; /credits/verify with bad signature→400 'Invalid Razorpay signature'; payment_transactions row inserted with status='created'. Frontend: window.Razorpay loaded, clicking topup-starter fires API call (200) and opens the Razorpay iframe. (2) Zone editor — POST /cameras accepts zones; PATCH /cameras/{id} persists normalized 0-1 polygon points; GET reflects them; analyze runs zone-aware and returns a valid event. UI ZoneEditor opens, canvas click adds points, Close polygon adds zone, Save persists → 'Zones saved' toast → camera card shows zone badge. (3) Twilio BYO WhatsApp — POST /settings/byo saves nested twilio {sid,token,from}; GET returns masked partials; whatsapp channel with fake BYO creds returns status='error' with twilio auth detail (proves REAL API call, not simulated); channel WITHOUT BYO returns status='error' detail='No twilio keys in Settings'. Slack/webhook still 'sent', email/teams still 'simulated'. Alerts modal: kind=whatsapp shows provider dropdown [twilio,plivo]; kind=sms shows [twilio,plivo,exotel,vonage,messagebird]; kind=slack has no dropdown. Settings shows 'CONFIGURED · 3' badge for Twilio after save.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/backend_test.py",
+    "/app/backend/tests/test_iteration2.py",
+    "/app/test_reports/pytest/pytest_results.xml",
+    "/app/test_reports/pytest/pytest_iteration2.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "server.py now 1067 lines — becoming hard to maintain. Recommend splitting into routers/: auth.py, cameras.py, detections.py, analyze.py, channels.py, credits.py, byo.py.",
+    "In dispatch_alert() the whatsapp/sms/voice branch returns early on 'missing to number' or 'no <provider> keys' BEFORE inserting an alert_deliveries record (lines 364, 369). This means error dispatches aren't logged in the deliveries collection. Consider inserting a record for these early-return errors for auditability.",
+    "topup uses body.pack; TopupIn also has origin_url but it's unused. Either wire it (into Razorpay callback_url) or drop it.",
+    "credit_tx grants credits BEFORE Razorpay verification is done via verify (which uses find_one({status not paid}) idempotency guard — OK); however if Razorpay webhook fires AND user manually calls verify, both attempt to add credits (webhook uses status!='paid' filter, verify uses status='paid' short-circuit) — collision window is tight but exists if run concurrently. Consider a Mongo unique index or atomic $set with status transition.",
+    "verify_payment does not validate that the razorpay_order_id belongs to the current user (the find_one is scoped to user_id, so 404s cleanly — OK); good.",
+    "Razorpay signature verification uses hmac.compare_digest — good. RAZORPAY_KEY_SECRET is loaded from .env — good.",
+    "BYO masking in get_byo may return an empty string '' for empty fields but frontend fills that as placeholder — cosmetic only.",
+    "Zone points are normalized 0-1 and stored as-is — server does not clamp/validate range. Consider server-side clamp to [0,1] and enforce min 3 points."
+  ],
+  "updated_files": [
+    "/app/backend/tests/backend_test.py",
+    "/app/backend/tests/test_iteration2.py"
+  ],
+  "success_rate": {"backend": "100% (31/31)", "frontend": "100%"},
+  "test_credentials": "Iteration-2 tests spawn fresh TEST_it2_* / TEST_it2fresh_* / TEST_nvbe_* / test_nvfe2_* accounts per run with Testpass123!. Original nvision.tester@example.com / Testpass123! still valid.",
+  "seed_data_creation": "Each pytest run creates fresh signup users, cameras (Zone cam + Zone analyze cam), a person-detection, 1 analyze event, 3 payment_transactions with status='created' (starter topup order), a couple channels (webhook/slack/email/teams/whatsapp/wa-no-keys). No production data touched.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Razorpay checkout: cannot complete real payment end-to-end in Playwright (needs OTP/card entry inside iframe). Verified: (a) POST /credits/topup returns 200 with order_id, (b) window.Razorpay is loaded via /app/frontend/public/index.html script tag, (c) rzp.open() opens an iframe (razorpay iframe detected on click). BYO Twilio with fake sid/token intentionally returns status='error' from _send_via_provider — that's correct behavior and NOT a bug. Zones are normalized 0-1 floats; frontend rounds to 4 decimals. Zone editor image loads via camera.snapshot_url with pexels fallback on error. Backend test file split: original backend_test.py (updated to reflect new topup shape + iteration-2 WA behavior) + new test_iteration2.py (10 targeted tests).",
+  "rca of the issue": "N/A — no bugs found."
+}

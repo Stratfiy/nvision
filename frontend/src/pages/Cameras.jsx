@@ -1,8 +1,9 @@
 import React, { useEffect, useState } from "react";
 import { api } from "@/lib/api";
 import { Link } from "react-router-dom";
-import { Plus, Cctv, Trash2, X, ImagePlus } from "lucide-react";
+import { Plus, Cctv, Trash2, X, Layers } from "lucide-react";
 import { toast } from "sonner";
+import ZoneEditor from "@/components/ZoneEditor";
 
 const DEMO_SNAPSHOTS = [
   "https://images.pexels.com/photos/36162857/pexels-photo-36162857.jpeg?auto=compress&cs=tinysrgb&dpr=2&h=650&w=940",
@@ -12,6 +13,7 @@ const DEMO_SNAPSHOTS = [
 export default function Cameras() {
   const [cams, setCams] = useState([]);
   const [showAdd, setShowAdd] = useState(false);
+  const [zoneCam, setZoneCam] = useState(null);
 
   const load = () => api.get("/cameras").then((r) => setCams(r.data));
   useEffect(() => { load(); }, []);
@@ -28,7 +30,7 @@ export default function Cameras() {
       <div className="flex items-baseline justify-between mb-6">
         <div>
           <h1 className="font-display font-black text-4xl tracking-tighter">Cameras</h1>
-          <p className="text-[13px] text-[#a3a3a3] mt-1">RTSP, IP, or snapshot URL. Upload a clip works too.</p>
+          <p className="text-[13px] text-[#a3a3a3] mt-1">RTSP, IP, or snapshot URL. Draw zones to constrain detections to specific regions.</p>
         </div>
         <button data-testid="add-camera-btn" onClick={()=>setShowAdd(true)} className="nv-hard-btn inline-flex items-center gap-2 text-sm">
           <Plus size={14}/> Add camera
@@ -56,6 +58,12 @@ export default function Cameras() {
                   <span className={`w-1.5 h-1.5 rounded-full ${c.status==="online" ? "nv-live-dot" : "bg-[#525252]"}`} />
                   <span className="font-mono text-[10px] tracking-widest">{c.status?.toUpperCase()}</span>
                 </div>
+                {c.zones?.length > 0 && (
+                  <div className="absolute bottom-2 left-2 bg-black/60 backdrop-blur px-2 py-0.5 flex items-center gap-1">
+                    <Layers size={10} className="text-[#ccff00]"/>
+                    <span className="font-mono text-[10px] text-[#ccff00]">{c.zones.length} zone{c.zones.length===1?"":"s"}</span>
+                  </div>
+                )}
                 <button
                   onClick={()=>del(c.id)}
                   className="absolute top-2 right-2 p-1.5 bg-black/60 backdrop-blur text-[#a3a3a3] hover:text-[#ff3366] opacity-0 group-hover:opacity-100 transition-opacity"
@@ -64,17 +72,27 @@ export default function Cameras() {
                   <Trash2 size={13}/>
                 </button>
               </div>
-              <Link to={`/app/detections?camera=${c.id}`} className="block p-4">
-                <div className="font-display font-bold">{c.name}</div>
-                <div className="text-[11px] font-mono text-[#737373] mt-1 truncate">{c.rtsp_url || c.snapshot_url || "—"}</div>
-                <div className="text-[10px] text-[#a3a3a3] mt-2 tracking-widest">{c.site?.toUpperCase()} · {c.timezone}</div>
-              </Link>
+              <div className="p-4">
+                <Link to={`/app/detections?camera=${c.id}`} className="block">
+                  <div className="font-display font-bold hover:text-[#ccff00] transition-colors">{c.name}</div>
+                  <div className="text-[11px] font-mono text-[#737373] mt-1 truncate">{c.rtsp_url || c.snapshot_url || "—"}</div>
+                  <div className="text-[10px] text-[#a3a3a3] mt-2 tracking-widest">{c.site?.toUpperCase()} · {c.timezone}</div>
+                </Link>
+                <button
+                  onClick={()=>setZoneCam(c)}
+                  className="mt-3 border border-[#262626] hover:border-[#ccff00] text-[11px] font-mono tracking-widest text-[#a3a3a3] hover:text-[#ccff00] px-3 py-1.5 inline-flex items-center gap-1.5 transition-colors"
+                  data-testid={`zones-cam-${c.id}`}
+                >
+                  <Layers size={11}/> {c.zones?.length ? "EDIT ZONES" : "DRAW ZONES"}
+                </button>
+              </div>
             </div>
           ))}
         </div>
       )}
 
       {showAdd && <AddCameraModal onClose={()=>{ setShowAdd(false); load(); }} />}
+      {zoneCam && <ZoneEditor camera={zoneCam} onClose={(changed)=>{ setZoneCam(null); if (changed) load(); }} />}
     </div>
   );
 }

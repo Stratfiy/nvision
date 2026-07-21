@@ -4,14 +4,20 @@ import { Plus, X, Bell, Trash2, Send, MessageCircle, Slack, Webhook, Mail, Phone
 import { toast } from "sonner";
 
 const KINDS = [
-  { key: "slack",    label: "Slack",         icon: Slack,        desc: "Fully functional. Paste incoming webhook URL." },
-  { key: "webhook",  label: "Webhook",       icon: Webhook,      desc: "Fully functional. HMAC signed POST to your URL." },
-  { key: "whatsapp", label: "WhatsApp",      icon: MessageCircle, desc: "Simulated for MVP. Add Twilio/Plivo keys in Settings — Phase 2." },
-  { key: "email",    label: "Email",         icon: Mail,          desc: "Simulated for MVP. Delivery logged." },
-  { key: "sms",      label: "SMS",           icon: Phone,         desc: "Simulated for MVP. DLT-ready templates." },
-  { key: "voice",    label: "Voice call",    icon: PhoneCall,     desc: "Simulated for MVP. TTS reads alert." },
-  { key: "teams",    label: "Microsoft Teams", icon: Users,       desc: "Simulated for MVP." },
+  { key: "slack",    label: "Slack",           icon: Slack,        desc: "Fully functional. Paste incoming webhook URL." },
+  { key: "webhook",  label: "Webhook",         icon: Webhook,      desc: "Fully functional. HMAC-signed POST to your URL." },
+  { key: "whatsapp", label: "WhatsApp",        icon: MessageCircle, desc: "Real dispatch via your BYO provider (Twilio · Plivo · Gupshup via 360dialog). Set keys in Settings first." },
+  { key: "sms",      label: "SMS",             icon: Phone,        desc: "Real dispatch via BYO Twilio · Plivo · Exotel · Vonage · MessageBird. Set keys in Settings." },
+  { key: "voice",    label: "Voice call",      icon: PhoneCall,    desc: "Real dispatch via BYO Twilio (TTS) or Exotel. Set keys in Settings." },
+  { key: "email",    label: "Email",           icon: Mail,         desc: "Simulated for MVP. Resend/SendGrid = Phase 2." },
+  { key: "teams",    label: "Microsoft Teams", icon: Users,        desc: "Simulated for MVP." },
 ];
+
+const PROVIDERS_FOR = {
+  whatsapp: ["twilio", "plivo"],
+  sms:      ["twilio", "plivo", "exotel", "vonage", "messagebird"],
+  voice:    ["twilio", "exotel"],
+};
 
 export default function Alerts() {
   const [chs, setChs] = useState([]);
@@ -151,6 +157,8 @@ function AddChannel({ onClose }) {
     teams:    [{k:"url", label:"TEAMS WEBHOOK URL"}],
   };
 
+  const providersForKind = PROVIDERS_FOR[kind];
+
   return (
     <div className="fixed inset-0 z-40 bg-black/70 backdrop-blur grid place-items-center p-4">
       <div className="nv-card p-6 w-full max-w-lg relative">
@@ -173,6 +181,19 @@ function AddChannel({ onClose }) {
             <span className="block text-[10px] tracking-widest text-[#a3a3a3] font-mono mb-1">NAME</span>
             <input required value={name} onChange={(e)=>setName(e.target.value)} placeholder={`My ${kind} channel`} className="w-full bg-[#050505] border border-[#262626] px-3 py-2 text-[13px] font-mono focus:border-[#ccff00] outline-none" data-testid="ch-name"/>
           </label>
+          {providersForKind && (
+            <label className="block">
+              <span className="block text-[10px] tracking-widest text-[#a3a3a3] font-mono mb-1">PROVIDER (BYO KEYS FROM SETTINGS)</span>
+              <select
+                value={config.provider || providersForKind[0]}
+                onChange={(e)=>setConfig({...config, provider: e.target.value})}
+                className="w-full bg-[#050505] border border-[#262626] px-3 py-2 text-[13px] font-mono focus:border-[#ccff00] outline-none"
+                data-testid="ch-provider"
+              >
+                {providersForKind.map((p)=><option key={p} value={p}>{p}</option>)}
+              </select>
+            </label>
+          )}
           {fields[kind].map((f)=>(
             <label key={f.k} className="block">
               <span className="block text-[10px] tracking-widest text-[#a3a3a3] font-mono mb-1">{f.label}</span>
