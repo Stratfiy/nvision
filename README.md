@@ -56,7 +56,23 @@ Secrets never go in git — `.env` is generated on the box and `.gitignore`d.
 
 3. **Open http://localhost:3000** → sign up (free credits are granted automatically).
 
-4. **Add a camera** with a live RTSP URL (a public test stream with people walking works well, e.g. from https://test.rtsp.stream).
+4. **Add a camera** with a live RTSP URL. No camera handy? Use the **built-in test stream** (see below) — no external service or credentials needed.
+
+### Built-in test stream (no external dependencies)
+
+Public test streams expire and come and go. To exercise the full pipeline reliably, the compose file ships an optional RTSP test-stream service (MediaMTX + ffmpeg) that generates a moving pattern inside the Docker network. Start the stack with the `test` profile:
+
+```bash
+docker compose --profile test up -d --build
+```
+
+Then add a camera with this RTSP URL (reachable from the worker over the Docker network):
+
+```
+rtsp://teststream:8554/people
+```
+
+Within ~seconds the camera goes ONLINE, Live View shows the moving pattern, and — with a detection created and a Gemini key set — events flow. The pattern is synthetic (not people), so use a detection prompt like *"Is a colorful moving pattern visible?"* to see a match, or point the camera at a real stream for person detection.
 
 5. **Create a detection** from the "Trespasser/Person" template on that camera (set cooldown, e.g. 60s), and add an alert channel (Slack incoming webhook, or a generic webhook pointed at https://webhook.site for testing).
 

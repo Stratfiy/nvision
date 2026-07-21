@@ -51,5 +51,16 @@ services:
     depends_on:
       - backend
 
+  # Built-in RTSP test stream — opt-in via the "test" profile. Generates a
+  # moving pattern so you can exercise the pipeline with no external stream.
+  #   docker compose --profile test up -d --build
+  #   add a camera with RTSP URL:  rtsp://teststream:8554/people
+  teststream:
+    image: bluenviron/mediamtx:latest-ffmpeg
+    profiles: ["test"]
+    volumes:
+      - ./teststream/mediamtx.yml:/mediamtx.yml
+    restart: unless-stopped
+
 volumes:
   mongo_data:
