@@ -83,7 +83,7 @@ export default function Detections() {
                 <div>
                   <div className="font-display font-bold text-[16px]">{d.name}</div>
                   <div className="text-[11px] font-mono text-[#737373] mt-1">
-                    {d.camera_name} · sens {d.sensitivity.toFixed(2)} · fires {d.fires_count || 0}
+                    {d.camera_name} · sens {d.sensitivity.toFixed(2)} · cooldown {d.cooldown_seconds ?? 120}s · fires {d.fires_count || 0}
                   </div>
                 </div>
                 <button onClick={()=>del(d.id)} className="text-[#737373] hover:text-[#ff3366]" data-testid={`del-det-${d.id}`}><Trash2 size={14}/></button>
@@ -122,6 +122,7 @@ function Builder({ cams, templates, preselectCam, onClose }) {
   const [prompt, setPrompt] = useState("");
   const [sensitivity, setSens] = useState(0.6);
   const [schedule, setSchedule] = useState("always");
+  const [cooldown, setCooldown] = useState(120);
   const [samples, setSamples] = useState([]);
   const [busy, setBusy] = useState(false);
 
@@ -151,6 +152,7 @@ function Builder({ cams, templates, preselectCam, onClose }) {
         camera_id: cameraId, name, prompt,
         sample_images_b64: samples,
         sensitivity, schedule,
+        cooldown_seconds: Number(cooldown) || 120,
         zones: [], enabled: true,
       });
       toast.success("Detection created");
@@ -196,6 +198,13 @@ function Builder({ cams, templates, preselectCam, onClose }) {
           <label className="block">
             <span className="block text-[10px] tracking-widest text-[#a3a3a3] font-mono mb-1">SENSITIVITY · {sensitivity.toFixed(2)}</span>
             <input type="range" min="0.3" max="0.95" step="0.05" value={sensitivity} onChange={(e)=>setSens(parseFloat(e.target.value))} className="w-full accent-[#ccff00]" data-testid="builder-sens"/>
+          </label>
+
+          <label className="block">
+            <span className="block text-[10px] tracking-widest text-[#a3a3a3] font-mono mb-1">COOLDOWN (SECONDS) — SKIP RE-ANALYSIS AFTER A FIRE</span>
+            <input type="number" min="0" step="1" value={cooldown} onChange={(e)=>setCooldown(e.target.value)}
+              className="w-full bg-[#050505] border border-[#262626] px-3 py-2 text-[13px] font-mono focus:border-[#ccff00] outline-none"
+              data-testid="builder-cooldown"/>
           </label>
 
           <label className="block">

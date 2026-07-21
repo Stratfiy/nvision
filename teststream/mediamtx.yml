@@ -1,0 +1,17 @@
+# Built-in RTSP test stream (MediaMTX + ffmpeg).
+# Generates a continuously-moving pattern so you can exercise the full NVision
+# pipeline (connect -> motion gate -> ingest -> VLM) with no external stream,
+# no expired credentials, and no signup.
+#
+# Enable it:   docker compose --profile test up -d --build
+# Then add a camera with RTSP URL:   rtsp://teststream:8554/people
+#
+# The moving mandelbrot guarantees motion so the gate fires; swap the ffmpeg
+# input for a looped file if you want a more realistic scene.
+paths:
+  people:
+    runOnInit: >
+      ffmpeg -re -f lavfi -i mandelbrot=size=640x360:rate=15
+      -c:v libx264 -preset ultrafast -tune zerolatency -pix_fmt yuv420p -g 30
+      -f rtsp rtsp://localhost:$RTSP_PORT/$MTX_PATH
+    runOnInitRestart: yes
