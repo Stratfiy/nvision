@@ -1,65 +1,62 @@
 # NVision — PRD & Build Log
 
 ## Original problem statement
-> I want to build an AI vision platform for realtime updates. Connect CCTV cameras, add API keys or use platform-hosted models, start with free credits then charge. Use cases from public safety to B2B — thermal cameras, precision manufacturing quality inspection, detect unsafe workers without safety gear via prompt. Not only detect but send data / notifications via webhook / Telegram / Slack / phone call / Teams. Memory layer: AI stores text summaries so users can ask about incidents at specific times without replaying clips.
+Build an AI vision platform that turns any RTSP/IP camera into an intelligent agent — plain-English detection prompts, real-time alerts on WhatsApp/Slack/webhook/call, and a searchable text memory of every event.
 
-User expanded the vision into a detailed PRD (see chat), codename **NVision**, positioning: **"Vapi of vision"** — developer-friendly, self-serve, BYO keys, India-first (WhatsApp-first, Razorpay, DLT-aware SMS), memory-as-product.
+User expanded into "Vapi of vision" — developer-friendly, self-serve, BYO keys, India-first (Razorpay + DLT-aware SMS + WhatsApp-first), memory-as-product.
 
-## Architecture (v0.1 MVP)
-- **Frontend**: React 19 + React Router + Tailwind + Shadcn UI + Recharts + Lucide + Sonner (toasts). Fonts: Cabinet Grotesk / IBM Plex Sans / JetBrains Mono. Dark terminal aesthetic (`#050505` / `#ccff00`).
-- **Backend**: FastAPI + Motor (MongoDB) + JWT auth + bcrypt + httpx.
-- **AI**: Gemini 3 Flash (`gemini-3-flash-preview`) via emergentintegrations for image analysis, Claude Sonnet 4.6 for memory Q&A.
-- **Data**: MongoDB collections — users, cameras, detections, events, channels, alert_deliveries, credit_tx, api_keys.
+## Architecture
+- **Frontend**: React 19 + Tailwind + Shadcn UI + Recharts + Lucide + Sonner. Fonts: Cabinet Grotesk / IBM Plex Sans / JetBrains Mono. Dark terminal aesthetic (#050505 / #ccff00).
+- **Backend**: FastAPI + Motor (MongoDB) + JWT + bcrypt + httpx + razorpay + twilio.
+- **AI**: Gemini 3 Flash (vision, zone-aware prompts) · Claude Sonnet 4.6 (memory Q&A).
+- **Payments**: Razorpay Checkout (INR, test mode) + signature verify + webhook.
+- **Alerts**: Slack (live) · Webhook (live, HMAC) · Twilio/Plivo/Exotel/Vonage/MessageBird (BYO — real dispatch) · Email/Teams (simulated).
 
-## Implemented (v0.1) — 21 Jul 2026
-- JWT email/password auth + 500-credit signup bonus + credit ledger.
-- Cameras: CRUD, snapshot URL / RTSP field, demo snapshot quick-picks.
-- Detections: prompt + up-to-6 sample images + 10-template library (Trespasser, PPE Helmet, PPE Vest, Smoke/Fire, Vehicle, Zone intrusion, Crowd, Door open, Quality defect, Camera tamper) + sensitivity slider + schedule.
-- `/api/analyze` — deducts VLM credits, calls Gemini 3 Flash vision with prompt + reference samples, returns match/confidence/caption/objects, stores event, fans out to enabled channels.
-- Events feed with match/no-match filters, thumbs-up/down feedback loop, acknowledge button.
-- Memory search — keyword + LLM synthesis over event captions, cited answer via Claude Sonnet.
-- Alert channels: Slack (LIVE), Webhook (LIVE, HMAC-signed), WhatsApp / SMS / Voice / Email / Teams (SIMULATED — MOCKED delivery log).
-- Delivery log page with status per dispatch.
-- Credits/Billing: rate card, 7-day burn, projection, top-up packs (starter/growth/scale) — MOCKED (Stripe/Razorpay checkout is Phase 2, top-up adds credits instantly).
-- API keys: create/rotate/revoke, one-time-view secret, SHA-256 hash storage.
-- Analytics: totals, precision from feedback, 7-day events line chart, busiest cameras bar chart.
-- Settings: BYO OpenAI/Anthropic/Gemini/Twilio/Plivo/Exotel keys (encrypted-at-rest masked).
-- Landing page + login/signup.
+## Implemented (v0.2) — 21 Jul 2026
 
-## User personas
-1. **Citizen / small shop** — free tier, WhatsApp alerts, hobby prompts.
-2. **SMB (warehouse, retail)** — Business tier, custom prompts, Slack + webhook, API.
-3. **Factory / cold storage** — Industrial tier, PPE/smoke packs, escalation chains.
-4. **Developer / integrator** — API-first, BYO keys, credit-based.
+### v0.1 (baseline)
+- JWT auth + 500-credit signup bonus + credit ledger.
+- Cameras (CRUD, snapshot URL, demo picks).
+- Detections (prompt + sample images + 10 templates + sensitivity + schedule).
+- Vision `/api/analyze` via Gemini 3 Flash.
+- Events feed + feedback loop + acknowledge.
+- Memory search (keyword + Claude synthesis).
+- Alert channels + delivery log.
+- API keys.
+- Analytics.
+- Landing/login/signup.
 
-## Backlog / next phases
+### v0.2 additions
+- **Razorpay Checkout**: `/api/credits/topup` creates order, opens Razorpay modal on frontend, `/api/credits/verify` HMAC-checks signature and grants credits, `/api/credits/razorpay/webhook` for reliability. INR packs: Starter ₹499 / Growth ₹1999 / Scale ₹7999.
+- **Zone Editor**: Camera has `zones: [{name, points: [[x,y],...]}]` (normalized 0-1). Frontend canvas polygon draw over camera snapshot. Detection prompt is zone-aware — model only reports match if target is inside a zone.
+- **BYO Telephony**: Real dispatch via user-configured Twilio (WhatsApp+SMS+Voice), Plivo (SMS+WhatsApp), Exotel (SMS+Voice, India), Vonage (SMS), MessageBird (SMS). Settings page has multi-field entry per provider. Alerts modal has provider selector for WhatsApp/SMS/Voice channel kinds. Delivery log records all attempts.
 
-### P0 — near-term polish
-- Real Stripe + Razorpay checkout for top-ups.
-- Emergent Google OAuth login (currently JWT only).
-- Zones polygon editor per camera.
-- Escalation chains (ordered channel steps + acknowledgment windows).
-- Backtest button on detection builder.
+## Backlog
+### P0
+- WhatsApp Business Cloud API (direct Meta, no Twilio) for Indian merchants.
+- Escalation chains (ordered channel steps with ack windows + DTMF).
+- Real RTSP → snapshot ingestion worker (ffmpeg).
+- Slack interactive buttons (Ack / False alarm) via Slack OAuth app.
+- Motion-gate + object-detect stage before VLM (cost control).
 
-### P1 — v0.2 / v1.0
-- Real WhatsApp / Twilio / Plivo / Exotel dispatch (currently simulated).
-- Voice call TTS reading alert + DTMF ack.
-- Slack OAuth app + interactive buttons (Ack / False alarm).
+### P1
 - Semantic memory search (embeddings) — currently keyword-only.
-- Real RTSP ingestion via edge worker (ffmpeg → snapshot → analyze).
-- Motion gate stage + object-detector stage before VLM.
-- Camera health / offline detection.
+- GST-compliant Razorpay invoices + auto-email.
+- Camera health / offline detection + auto-reconnect.
+- Edge agent (on-prem gateway) for low-bandwidth sites.
 
-### P2 — Industrial
-- Audit log, SLA tooling, multi-site reports.
-- Thermal camera pilot program.
-- Edge agent (on-prem gateway).
-- Privacy-mask polygon editor.
-
-## Success metrics (from user PRD)
-- Activation < 10 min median · retention 70% D30 · precision > 90% · free→paid 8–12% · break-even at 110 paying cameras.
+### P2
+- Thermal camera pilot.
+- Audit log + SLA tooling.
+- Privacy-mask polygon editor (opposite of zones).
 
 ## Known limitations / MOCKED
-- WhatsApp / SMS / Voice / Email / Teams dispatch = **SIMULATED** (logged in delivery log, marked `simulated`).
-- Stripe / Razorpay top-up = **SIMULATED** (credits granted instantly).
-- RTSP live streaming = **not implemented** (analysis only via snapshot URL / image upload / API).
+- Email / Teams dispatch = simulated (Resend/SendGrid + Teams webhook = Phase 2).
+- Razorpay ends at signature verify — GST invoices, Razorpay Payment Links, subscriptions = future.
+- No RTSP live streaming yet — analysis via snapshot URL or image upload only.
+
+## Success metrics (from PRD)
+Activation <10min · retention 70% D30 · precision >90% · free→paid 8–12% · break-even 110 paying cameras.
+
+## Test credentials
+`nvision.tester@example.com` / `Testpass123!` (500 free credits)

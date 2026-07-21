@@ -361,15 +361,19 @@ async def dispatch_alert(user_id: str, channel: Dict[str, Any], subject: str, bo
             provider = cfg.get("provider", "twilio")
             to = cfg.get("to", "")
             if not to:
-                return {"status": "error", "detail": "missing 'to' number"}
-            user = await db.users.find_one({"id": user_id})
-            byo = (user or {}).get("byo_keys", {}) or {}
-            prov_keys = byo.get(provider)
-            if not isinstance(prov_keys, dict) or not prov_keys:
-                return {"status": "error", "detail": f"No {provider} keys in Settings — add them under BYO Provider Keys"}
-            msg = f"{subject}\n{body}"[:1500]
-            r = await _send_via_provider(provider, prov_keys, kind, to, msg)
-            status, detail = r["status"], r["detail"]
+                status = "error"
+                detail = "missing 'to' number"
+            else:
+                user = await db.users.find_one({"id": user_id})
+                byo = (user or {}).get("byo_keys", {}) or {}
+                prov_keys = byo.get(provider)
+                if not isinstance(prov_keys, dict) or not prov_keys:
+                    status = "error"
+                    detail = f"No {provider} keys in Settings — add them under BYO Provider Keys"
+                else:
+                    msg = f"{subject}\n{body}"[:1500]
+                    r = await _send_via_provider(provider, prov_keys, kind, to, msg)
+                    status, detail = r["status"], r["detail"]
 
         elif kind in ("email", "teams"):
             # SIMULATED — Email via Resend/SendGrid and Teams webhook = Phase 2.
