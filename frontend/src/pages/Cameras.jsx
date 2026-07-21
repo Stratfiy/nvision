@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { api } from "@/lib/api";
 import { Link } from "react-router-dom";
-import { Plus, Cctv, Trash2, X, Layers, Pencil } from "lucide-react";
+import { Plus, Cctv, Trash2, X, Layers, Pencil, Play } from "lucide-react";
 import { toast } from "sonner";
 import ZoneEditor from "@/components/ZoneEditor";
 
@@ -15,6 +15,7 @@ export default function Cameras() {
   const [showAdd, setShowAdd] = useState(false);
   const [zoneCam, setZoneCam] = useState(null);
   const [editCam, setEditCam] = useState(null);
+  const [liveCam, setLiveCam] = useState(null);
 
   const load = () => api.get("/cameras").then((r) => setCams(r.data));
   useEffect(() => { load(); }, []);
@@ -49,8 +50,11 @@ export default function Cameras() {
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
           {cams.map((c) => (
             <div key={c.id} className="nv-card overflow-hidden relative group" data-testid={`camera-card-${c.id}`}>
-              <div className="aspect-video bg-[#0a0a0a] relative nv-scanlines">
+              <div className="aspect-video bg-[#0a0a0a] relative nv-scanlines cursor-pointer" onClick={()=>setLiveCam(c)} data-testid={`live-cam-${c.id}`}>
                 <CameraPreview camera={c} />
+                <div className="absolute inset-0 grid place-items-center opacity-0 group-hover:opacity-100 transition-opacity bg-black/30">
+                  <div className="bg-[#ccff00] text-black rounded-full p-3"><Play size={20} fill="black"/></div>
+                </div>
                 <div className="absolute top-2 left-2 flex items-center gap-1.5 bg-black/60 backdrop-blur px-2 py-0.5">
                   <span className={`w-1.5 h-1.5 rounded-full ${c.status==="online" ? "nv-live-dot" : "bg-[#525252]"}`} />
                   <span className="font-mono text-[10px] tracking-widest">{c.status?.toUpperCase()}</span>
@@ -77,6 +81,13 @@ export default function Cameras() {
                 </Link>
                 <div className="mt-3 flex flex-wrap gap-2">
                   <button
+                    onClick={()=>setLiveCam(c)}
+                    className="border border-[#262626] hover:border-[#ccff00] text-[11px] font-mono tracking-widest text-[#a3a3a3] hover:text-[#ccff00] px-3 py-1.5 inline-flex items-center gap-1.5 transition-colors"
+                    data-testid={`live-btn-${c.id}`}
+                  >
+                    <Play size={11}/> LIVE VIEW
+                  </button>
+                  <button
                     onClick={()=>setZoneCam(c)}
                     className="border border-[#262626] hover:border-[#ccff00] text-[11px] font-mono tracking-widest text-[#a3a3a3] hover:text-[#ccff00] px-3 py-1.5 inline-flex items-center gap-1.5 transition-colors"
                     data-testid={`zones-cam-${c.id}`}
@@ -98,6 +109,7 @@ export default function Cameras() {
       )}
 
       {showAdd && <AddCameraModal onClose={()=>{ setShowAdd(false); load(); }} />}
+      {liveCam && <LiveView camera={liveCam} onClose={()=>setLiveCam(null)} />}
       {editCam && <EditRtspModal camera={editCam} onClose={()=>{ setEditCam(null); load(); }} />}
       {zoneCam && <ZoneEditor camera={zoneCam} onClose={(changed)=>{ setZoneCam(null); if (changed) load(); }} />}
     </div>
@@ -142,6 +154,58 @@ function AddCameraModal({ onClose }) {
           <Field label="SITE" value={site} onChange={(e)=>setSite(e.target.value)} testid="cam-site" />
           <button data-testid="submit-add-cam" disabled={busy} className="nv-hard-btn w-full text-sm mt-3">{busy ? "…" : "Add camera"}</button>
         </form>
+      </div>
+    </div>
+  );
+}
+
+function LiveView({ camera, onClose }) {
+  // Near-live player: rapidly refreshes the still the worker captures from the
+  // RTSP stream (~2s cadence). Not full-motion video — the app is snapshot-based
+  // by design. Poll a bit faster than the worker pushes so we always show latest.
+  const [frame, setFrame] = useState(null);
+  const [ts, setTs] = useState(null);
+  const [status, setStatus] = useState("connecting");
+
+  useEffect(() => {
+    let alive = true;
+    let misses = 0;
+    const tick = () => api.get(`/cameras/${camera.id}/snapshot`)
+      .then((r) => {
+        if (!alive) return;
+        misses = 0;
+        if (r.data?.image_b64) { setFrame(`data:image/jpeg;base64,${r.data.image_b64}`); setTs(r.data.ts); setStatus("live"); }
+      })
+      .catch(() => { if (alive) { misses += 1; setStatus(misses > 2 ? "waiting" : status); } });
+    tick();
+    const t = setInterval(tick, 1500);
+    return () => { alive = false; clearInterval(t); };
+  }, [camera.id]);
+
+  return (
+    <div className="fixed inset-0 z-50 bg-black/85 backdrop-blur grid place-items-center p-4" onClick={onClose}>
+      <div className="nv-card w-full max-w-4xl relative" onClick={(e)=>e.stopPropagation()}>
+        <button onClick={onClose} className="absolute top-3 right-3 text-[#737373] hover:text-white z-10" data-testid="close-live"><X size={16}/></button>
+        <div className="px-5 py-3 border-b border-[#262626] flex items-center gap-3">
+          <span className={`w-2 h-2 rounded-full ${status==="live" ? "nv-live-dot" : "bg-[#ffb800]"}`} />
+          <span className="font-display font-black text-lg tracking-tight">{camera.name}</span>
+          <span className="font-mono text-[10px] tracking-widest text-[#a3a3a3]">{status==="live" ? "LIVE · ~2s SNAPSHOT" : "WAITING FOR STREAM"}</span>
+        </div>
+        <div className="bg-black aspect-video grid place-items-center overflow-hidden">
+          {frame ? (
+            <img src={frame} alt={camera.name} className="w-full h-full object-contain"/>
+          ) : (
+            <div className="text-center text-[#a3a3a3] p-8">
+              <Cctv size={40} className="mx-auto mb-3 text-[#525252]" strokeWidth={1.2}/>
+              <div className="text-[13px]">Waiting for the worker to capture a frame…</div>
+              <div className="text-[11px] text-[#737373] mt-2">This appears within ~seconds once the camera is <span className="text-[#ccff00]">ONLINE</span>. If it never appears, the stream isn't connecting — check the RTSP URL.</div>
+            </div>
+          )}
+        </div>
+        <div className="px-5 py-2 border-t border-[#262626] flex items-center justify-between">
+          <span className="font-mono text-[10px] text-[#737373]">{ts ? `frame @ ${new Date(ts).toLocaleTimeString()}` : "—"}</span>
+          <span className="font-mono text-[10px] text-[#737373]">Near-live snapshot view · full-motion video needs a streaming gateway</span>
+        </div>
       </div>
     </div>
   );
